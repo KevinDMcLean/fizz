@@ -21,6 +21,12 @@ python3 scripts/run_market_maker.py --market cl --account paper_default --dashbo
 python3 scripts/run_market_maker.py --market sp500 --account paper_default --dashboard
 ```
 
+### Kevin HYPE
+
+```bash
+python3 scripts/run_kevin_hype.py --market hype --account paper_default --dashboard
+```
+
 ### Mid momentum
 
 ```bash
@@ -51,6 +57,7 @@ python3 scripts/run_exhaustion_reversal.py --market brent --account paper_defaul
 
 - The launchers inject the local certificate bundle automatically when it is available in the suite virtual environment.
 - That keeps the suite independent of any certificate setup that may exist in an older repo or global Python installation.
+- On Windows PowerShell, activate the virtual environment with `.\\.venv\\Scripts\\Activate.ps1`.
 
 ## Where outputs go
 
@@ -64,6 +71,7 @@ Typical files:
 - `samples.jsonl`
 - `trades.csv`
 - `fills.csv` for the market maker
+- `fills.csv` for `Kevin Hype Liquidity Engine`
 - `markouts.jsonl` for momentum and reversal strategies
 - `reports/`
 - `run_manifest.json`

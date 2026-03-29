@@ -21,6 +21,7 @@ It keeps the strategy code, launch scripts, configs, documentation, and run outp
 ## Strategies included
 
 - `Atlas Liquidity Engine`: fee-aware market maker.
+- `Kevin Hype Liquidity Engine`: no-cost passive-first HYPE market maker tuned for active crypto weekends.
 - `Vector Momentum Engine`: mid-frequency confirmed-runner momentum trader.
 - `Extreme Momentum Engine`: rare-event momentum engine.
 - `Exhaustion Reversal Engine`: fade of overstretched moves after reversal confirmation.
@@ -31,6 +32,8 @@ It keeps the strategy code, launch scripts, configs, documentation, and run outp
   - Brent: `brent`
   - CL / WTI: `cl`
   - S&P 500: `sp500`
+- Kevin HYPE:
+  - HYPE: `hype`
 - Mid momentum:
   - Brent runner: `brent_runner`
 - Extreme momentum:
@@ -49,10 +52,25 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+On Windows PowerShell:
+
+```powershell
+cd "$HOME\\work\\trading\\fizz"
+python -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
+pip install -r requirements.txt
+```
+
 Run the fee-aware market maker on Brent:
 
 ```bash
 python3 scripts/run_market_maker.py --market brent --account paper_default --dashboard
+```
+
+Run Kevin Hype Liquidity Engine on HYPE:
+
+```bash
+python3 scripts/run_kevin_hype.py --market hype --account paper_default --dashboard
 ```
 
 Run the mid-momentum runner on Brent:
@@ -83,11 +101,13 @@ Read:
 
 - [Account And Repo Switching](docs/ACCOUNT_AND_REPO_SWITCHING.md)
 - [Runbook](docs/RUNBOOK.md)
+- [Kevin Hype Strategy Note](docs/STRATEGY_KEVIN_HYPE.md)
 
 ## Notes
 
 - The launch scripts create a fresh run folder each time under `runs/`.
 - Each run folder includes a `run_manifest.json` with the merged account and market config used for that run.
 - The market-maker codebase is shared across Brent, CL, and SP500. They are different configs, not different strategy codebases.
+- `Kevin Hype Liquidity Engine` is deliberately kept in its own namespace under `src/`, `config/`, `scripts/`, and `runs/`.
 - If the local `.venv/` exists, the launchers use it automatically.
 - The launchers also inject the local certificate bundle automatically so the suite works cleanly on macOS without depending on the old repo environment.

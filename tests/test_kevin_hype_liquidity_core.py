@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+import sys
+import time
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from atlas_mm_feeaware_core import MMStrategyConfig, MarketFeatures
+from kevin_hype_liquidity_core import build_kevin_quote_plan, zero_fee_state
+from pa_pump_pro_core import BookSnapshot
+
+
+class KevinHypeLiquidityCoreTests(unittest.TestCase):
+    def test_zero_fee_state_has_zero_rates(self) -> None:
+        state = zero_fee_state(turnover=12_500.0, started_at_ts=time.time() - 30.0)
+        self.assertEqual(state.maker_rate_bps, 0.0)
+        self.assertEqual(state.taker_rate_bps, 0.0)
+        self.assertEqual(state.maker_rebate_bps, 0.0)
+        self.assertEqual(state.net_maker_rate_bps, 0.0)
+        self.assertEqual(state.fee_rate_source, "kevin_no_cost_demo")
+
+    def test_healthy_tape_quotes_both_sides(self) -> None:
+        plan = build_kevin_quote_plan(
+            features=self._features(),
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quote_mode, "both")
+        self.assertGreater(plan.bid_size, 0.0)
+        self.assertGreater(plan.ask_size, 0.0)
+        self.assertLessEqual(plan.target_half_spread_bps, 1.5)
+
+    def test_buy_pressure_switches_to_bid_only(self) -> None:
+        features = self._features()
+        features.flow_imbalance = 0.45
+        features.book_imbalance = 0.24
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quote_mode, "bid_only")
+        self.assertTrue(plan.bid_enabled)
+        self.assertFalse(plan.ask_enabled)
+
+    def test_toxic_guard_flattens(self) -> None:
+        features = self._features()
+        features.flow_imbalance = 0.88
+        features.book_imbalance = 0.74
+        features.toxicity_score = 1.15
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertFalse(plan.quoting_enabled)
+        self.assertEqual(plan.quoting_reason, "toxicity_guard")
+        self.assertEqual(plan.quote_mode, "flat")
+
+    def test_deeper_book_scales_quote_size(self) -> None:
+        deep_plan = build_kevin_quote_plan(
+            features=self._features(),
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        thin_features = self._features()
+        thin_features.bid_depth = 30.0
+        thin_features.ask_depth = 24.0
+        thin_plan = build_kevin_quote_plan(
+            features=thin_features,
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=BookSnapshot(
+                bids=[(39.550, 10.0), (39.549, 8.0), (39.548, 7.0)],
+                asks=[(39.552, 8.0), (39.553, 7.0), (39.554, 6.0)],
+                exchange_time_ms=1_000,
+                received_time_ms=1_030,
+            ),
+            config=self._config(),
+        )
+        self.assertGreater(deep_plan.bid_size + deep_plan.ask_size, thin_plan.bid_size + thin_plan.ask_size)
+
+    def test_large_long_inventory_disables_bid(self) -> None:
+        features = self._features()
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=250.0,
+            inventory_avg_price=39.50,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertEqual(plan.quote_mode, "flat")
+        self.assertFalse(plan.quoting_enabled)
+        self.assertEqual(plan.quoting_reason, "one_way_guard")
+
+    def _features(self) -> MarketFeatures:
+        return MarketFeatures(
+            sample_exchange_time_ms=1_000,
+            sample_received_time_ms=1_030,
+            quote_age_ms=55,
+            transport_delay_ms=18,
+            bid=39.550,
+            ask=39.552,
+            mid=39.551,
+            microprice=39.5513,
+            spread_bps=0.506,
+            tick_size=0.001,
+            tick_bps=0.253,
+            recent_vol_bps=3.5,
+            impulse_bps=2.1,
+            flow_imbalance=0.08,
+            buy_volume=120.0,
+            sell_volume=104.0,
+            trade_count=16,
+            trade_rate_per_second=2.4,
+            book_imbalance=0.06,
+            bid_depth=620.0,
+            ask_depth=540.0,
+            toxicity_score=0.18,
+            event_regime=False,
+            quoting_health_ok=True,
+            quoting_health_reason="healthy",
+        )
+
+    def _book(self) -> BookSnapshot:
+        return BookSnapshot(
+            bids=[(39.550, 95.0), (39.549, 165.0), (39.548, 230.0)],
+            asks=[(39.552, 48.0), (39.553, 72.0), (39.554, 118.0)],
+            exchange_time_ms=1_000,
+            received_time_ms=1_030,
+        )
+
+    def _config(self) -> MMStrategyConfig:
+        return MMStrategyConfig(
+            account_balance=1000.0,
+            leverage=20,
+            sample_ms=75,
+            warm_start_candles=True,
+            startup_quote_immediately=True,
+            volatility_lookback_seconds=45.0,
+            impulse_window_seconds=6.0,
+            flow_window_seconds=6.0,
+            depth_levels=6,
+            min_trade_count=4,
+            max_spread_bps=9.0,
+            max_quote_age_ms=650,
+            quote_gap_warn_ms=1800,
+            reconnect_gap_ms=15000,
+            min_half_spread_bps=0.45,
+            target_edge_bps=0.22,
+            vol_spread_multiplier=0.16,
+            toxicity_spread_multiplier=1.05,
+            latency_spread_multiplier=0.75,
+            inventory_skew_bps=7.0,
+            base_order_notional=1600.0,
+            max_quote_notional=3200.0,
+            max_inventory_notional=9500.0,
+            requote_price_bps=0.35,
+            requote_size_pct=0.12,
+            min_requote_interval_ms=150,
+            min_quote_size_multiplier=0.50,
+            max_quote_size_multiplier=5.50,
+            max_top_level_share=0.28,
+            max_depth_share=0.12,
+            queue_ahead_penalty=0.10,
+            quote_guard_flow_imbalance=0.82,
+            quote_guard_book_imbalance=0.68,
+            quote_guard_toxicity=1.08,
+            one_way_flow_imbalance=0.28,
+            one_way_book_imbalance=0.16,
+            one_way_alpha_bps=0.80,
+            protection_markout_bps=4.20,
+            protection_flow_imbalance=0.42,
+            protection_book_imbalance=0.24,
+            event_impulse_bps=32.0,
+            event_vol_bps=22.0,
+            toxic_flow_imbalance=0.90,
+            toxic_book_imbalance=0.75,
+            adverse_exit_bps=10.5,
+            adverse_flow_exit_imbalance=0.50,
+            adverse_book_exit_imbalance=0.30,
+            max_inventory_hold_seconds=14.0,
+            kill_hold_seconds=20.0,
+            kill_on_event_loss_bps=7.0,
+            cooldown_seconds=1.5,
+            max_daily_loss=45.0,
+            max_episodes_per_day=0,
+            max_episodes_per_hour=0,
+            stop_quoting_on_event=False,
+            fee_product="perps",
+            fee_market_type="standard",
+            fee_staking_tier="base",
+            fee_tier_basis="actual",
+            fee_target_tier=0,
+            fee_initial_14d_perps_volume=0.0,
+            fee_initial_14d_spot_volume=0.0,
+            fee_taker_referral_discount_pct=0.0,
+            fee_maker_rebate_bps_override=0.0,
+            fee_deployer_fee_scale=0.0,
+            fee_growth_mode=False,
+            fee_aligned_quote_token=False,
+            fee_user_address="",
+            fee_user_maker_rate_pct_override=None,
+            fee_user_taker_rate_pct_override=None,
+            fee_buffer_bps=0.0,
+            fee_kill_buffer_bps=0.0,
+            expected_taker_share_floor=0.0,
+            tier_volume_boost_multiplier=0.0,
+            tier_volume_relaxation_multiplier=0.0,
+            size_toxicity_penalty=0.24,
+            size_vol_penalty=0.12,
+            size_spread_penalty=0.08,
+            size_inventory_penalty=0.22,
+            large_inventory_protection_ratio=0.48,
+            fee_bps=0.0,
+            slippage_bps=0.8,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
