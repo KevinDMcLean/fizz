@@ -1,0 +1,93 @@
+# Hyperliquid Strategy Suite
+
+This folder is a clean, self-contained home for the strategies built in this workspace.
+
+It keeps the strategy code, launch scripts, configs, documentation, and run outputs together so you can:
+
+- run the strategies from one place;
+- avoid copying the same strategy into separate codebases just to trade a different instrument;
+- switch account assumptions without editing code;
+- move the suite into a new repo later without dragging the original prototypes with it.
+
+## What is in this suite
+
+- `src/`: the strategy code copied from the current working versions.
+- `scripts/`: clear launch scripts for each strategy.
+- `config/`: account files and market profiles.
+- `docs/`: runbooks and strategy notes.
+- `tests/`: copied unit tests, adjusted to run against this suite.
+- `runs/`: per-run output folders created by the launch scripts.
+
+## Strategies included
+
+- `Atlas Liquidity Engine`: fee-aware market maker.
+- `Vector Momentum Engine`: mid-frequency confirmed-runner momentum trader.
+- `Extreme Momentum Engine`: rare-event momentum engine.
+- `Exhaustion Reversal Engine`: fade of overstretched moves after reversal confirmation.
+
+## Instruments currently configured
+
+- Market maker:
+  - Brent: `brent`
+  - CL / WTI: `cl`
+  - S&P 500: `sp500`
+- Mid momentum:
+  - Brent runner: `brent_runner`
+- Extreme momentum:
+  - Brent: `brent`
+- Exhaustion reversal:
+  - Brent: `brent`
+
+## Quick start
+
+From this folder:
+
+```bash
+cd "/Users/johngoodacre/work/hyperliquid-strategy-suite"
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Run the fee-aware market maker on Brent:
+
+```bash
+python3 scripts/run_market_maker.py --market brent --account paper_default --dashboard
+```
+
+Run the mid-momentum runner on Brent:
+
+```bash
+python3 scripts/run_mid_momentum.py --market brent_runner --account paper_default --dashboard
+```
+
+Run the extreme mover on Brent:
+
+```bash
+python3 scripts/run_extreme_momentum.py --market brent --account paper_default --dashboard
+```
+
+Run the exhaustion reversal engine on Brent:
+
+```bash
+python3 scripts/run_exhaustion_reversal.py --market brent --account paper_default --dashboard
+```
+
+Use `--dry-run` to print the exact commands and paths without starting anything.
+
+## Account changes
+
+The suite is designed so that account changes are config changes, not code changes.
+
+Read:
+
+- [Account And Repo Switching](docs/ACCOUNT_AND_REPO_SWITCHING.md)
+- [Runbook](docs/RUNBOOK.md)
+
+## Notes
+
+- The launch scripts create a fresh run folder each time under `runs/`.
+- Each run folder includes a `run_manifest.json` with the merged account and market config used for that run.
+- The market-maker codebase is shared across Brent, CL, and SP500. They are different configs, not different strategy codebases.
+- If the local `.venv/` exists, the launchers use it automatically.
+- The launchers also inject the local certificate bundle automatically so the suite works cleanly on macOS without depending on the old repo environment.

@@ -1,0 +1,7 @@
+{
+  "market_name": "Brent Crude Extreme Momentum",
+  "description": "Rare-event momentum engine for large oil shocks. This should trade infrequently and only in genuinely extreme tape.",
+  "asset": "xyz:BRENTOIL",
+  "dex": "xyz",
+  "dashboard_port": 8790
+}

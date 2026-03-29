@@ -1,0 +1,7 @@
+{
+  "market_name": "WTI Crude (CL)",
+  "description": "Fee-aware passive market maker for CL on Hyperliquid xyz.",
+  "asset": "xyz:CL",
+  "dex": "xyz",
+  "dashboard_port": 8786
+}

@@ -1,0 +1,7 @@
+{
+  "market_name": "Brent Crude Exhaustion Reversal",
+  "description": "Fade of overstretched oil moves once reversal evidence appears in flow and book behaviour.",
+  "asset": "xyz:BRENTOIL",
+  "dex": "xyz",
+  "dashboard_port": 8792
+}

@@ -1,0 +1,14 @@
+{
+  "account_name": "replace_me",
+  "description": "Copy this file, rename it, then update the balance, addresses, and live fee inputs for the account you want to model.",
+  "account_balance": 1000.0,
+  "leverage": 20,
+  "api_url": "https://api.hyperliquid.xyz",
+  "dex": "xyz",
+  "account_address": "",
+  "vault_address": "",
+  "maker_fee_pct_override": 0.0029,
+  "taker_fee_pct_override": 0.0086,
+  "maker_rebate_bps_override": 0.0
+}
+

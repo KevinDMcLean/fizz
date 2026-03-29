@@ -1,0 +1,7 @@
+{
+  "market_name": "S&P 500",
+  "description": "Fee-aware passive market maker for SP500 on Hyperliquid xyz.",
+  "asset": "xyz:SP500",
+  "dex": "xyz",
+  "dashboard_port": 8787
+}

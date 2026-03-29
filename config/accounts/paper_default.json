@@ -1,0 +1,13 @@
+{
+  "account_name": "paper_default",
+  "description": "Paper account using the collaborator Hyperliquid wallet address with the current working balance and the current effective Hyperliquid maker and taker rates supplied for the live account.",
+  "account_balance": 1000.0,
+  "leverage": 20,
+  "api_url": "https://api.hyperliquid.xyz",
+  "dex": "xyz",
+  "account_address": "0xc728A89F5e6D90c3baf2FdB62e6C37014222874f",
+  "vault_address": "",
+  "maker_fee_pct_override": 0.0029,
+  "taker_fee_pct_override": 0.0086,
+  "maker_rebate_bps_override": 0.0
+}

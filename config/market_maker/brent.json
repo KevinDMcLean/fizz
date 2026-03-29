@@ -1,0 +1,7 @@
+{
+  "market_name": "Brent Crude",
+  "description": "Fee-aware passive market maker for Brent on Hyperliquid xyz.",
+  "asset": "xyz:BRENTOIL",
+  "dex": "xyz",
+  "dashboard_port": 8785
+}
