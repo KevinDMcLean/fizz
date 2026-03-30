@@ -4,7 +4,7 @@ import logging
 import math
 import time
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Deque, Optional
 
 from atlas_mm_feeaware_core import (
@@ -25,6 +25,18 @@ from hyperliquid_fee_model import FeeState
 from pa_pump_pro_core import BookSnapshot, HyperliquidRealtimeMultiFeed, MarketSnapshot
 
 APP_NAME = "Kevin Hype Liquidity Engine"
+
+
+@dataclass
+class KevinHypeConfig(MMStrategyConfig):
+    max_long_episodes_per_day: int = 0
+    max_short_episodes_per_day: int = 0
+    max_long_episodes_per_hour: int = 0
+    max_short_episodes_per_hour: int = 0
+    fee_user_fee_source: str = "estimated_schedule"
+    long_entry_veto_flow_imbalance: float = 0.0
+    long_entry_veto_impulse_bps: float = 0.0
+    long_entry_veto_toxicity: float = 0.0
 
 
 def zero_fee_state(*, turnover: float = 0.0, started_at_ts: Optional[float] = None) -> FeeState:
@@ -82,7 +94,7 @@ def _same_side_pressure_score(
     *,
     features: MarketFeatures,
     inventory_qty: float,
-    config: MMStrategyConfig,
+    config: KevinHypeConfig,
 ) -> float:
     if inventory_qty == 0.0:
         return 0.0
@@ -98,7 +110,7 @@ def _adverse_inventory_flip_score(
     *,
     features: MarketFeatures,
     inventory_qty: float,
-    config: MMStrategyConfig,
+    config: KevinHypeConfig,
 ) -> float:
     if inventory_qty == 0.0:
         return 0.0
@@ -116,7 +128,7 @@ def _adverse_inventory_flip_score(
 def _long_entry_veto_score(
     *,
     features: MarketFeatures,
-    config: MMStrategyConfig,
+    config: KevinHypeConfig,
 ) -> float:
     if (
         config.long_entry_veto_flow_imbalance <= 0.0
@@ -139,7 +151,7 @@ def _inventory_unwind_reason(
     *,
     features: MarketFeatures,
     inventory_qty: float,
-    config: MMStrategyConfig,
+    config: KevinHypeConfig,
 ) -> Optional[str]:
     if inventory_qty == 0.0:
         return None
@@ -169,7 +181,7 @@ def _protection_exit_quotes(
     inventory_avg_price: Optional[float],
     exit_size: float,
     book: Optional[BookSnapshot],
-    config: MMStrategyConfig,
+    config: KevinHypeConfig,
     protection_reason: str,
     inv_ratio: float,
 ) -> tuple[Optional[float], Optional[float], float, float, int, float]:
@@ -359,7 +371,7 @@ def build_kevin_quote_plan(
     inventory_qty: float,
     inventory_avg_price: Optional[float],
     book: Optional[BookSnapshot],
-    config: MMStrategyConfig,
+    config: KevinHypeConfig,
     protection_reason: Optional[str] = None,
 ) -> QuotePlan:
     inv_notional = inventory_qty * features.mid
@@ -807,7 +819,7 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
         asset: str,
         api_url: str,
         dex: str,
-        config: MMStrategyConfig,
+        config: KevinHypeConfig,
         events_jsonl_path: str,
         samples_jsonl_path: str,
         fills_csv_path: str,
@@ -825,6 +837,8 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
             trades_csv_path=trades_csv_path,
             report_dir=report_dir,
         )
+        self.config: KevinHypeConfig = config
+        self.fee_config.user_fee_source = config.fee_user_fee_source
         self.daily_long_episode_count = 0
         self.daily_short_episode_count = 0
         self.hourly_long_episode_closed_at: Deque[float] = deque()

@@ -185,14 +185,6 @@ class MMStrategyConfig:
     large_inventory_protection_ratio: float
     fee_bps: float
     slippage_bps: float
-    max_long_episodes_per_day: int = 0
-    max_short_episodes_per_day: int = 0
-    max_long_episodes_per_hour: int = 0
-    max_short_episodes_per_hour: int = 0
-    fee_user_fee_source: str = "estimated_schedule"
-    long_entry_veto_flow_imbalance: float = 0.0
-    long_entry_veto_impulse_bps: float = 0.0
-    long_entry_veto_toxicity: float = 0.0
 
 
 @dataclass
@@ -1099,7 +1091,6 @@ class ProSpreadMarketMaker:
             aligned_quote_token=self.config.fee_aligned_quote_token,
             user_maker_rate_pct_override=self.config.fee_user_maker_rate_pct_override,
             user_taker_rate_pct_override=self.config.fee_user_taker_rate_pct_override,
-            user_fee_source=self.config.fee_user_fee_source,
         )
         self.fee_pct = self.config.fee_bps / 10_000.0
         self.slippage_pct = self.config.slippage_bps / 10_000.0

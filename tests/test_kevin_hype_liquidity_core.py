@@ -10,8 +10,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from atlas_mm_feeaware_core import MMStrategyConfig, MarketFeatures
-from kevin_hype_liquidity_core import build_kevin_quote_plan, enforce_kevin_entry_guards, zero_fee_state
+from atlas_mm_feeaware_core import MarketFeatures
+from kevin_hype_liquidity_core import KevinHypeConfig, build_kevin_quote_plan, enforce_kevin_entry_guards, zero_fee_state
 from pa_pump_pro_core import BookSnapshot
 
 
@@ -330,8 +330,8 @@ class KevinHypeLiquidityCoreTests(unittest.TestCase):
             received_time_ms=1_030,
         )
 
-    def _config(self) -> MMStrategyConfig:
-        return MMStrategyConfig(
+    def _config(self) -> KevinHypeConfig:
+        return KevinHypeConfig(
             account_balance=1000.0,
             leverage=20,
             sample_ms=75,

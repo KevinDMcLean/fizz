@@ -6,8 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from atlas_mm_feeaware_core import MMStrategyConfig
-from kevin_hype_liquidity_core import APP_NAME, KevinHypeLiquidityEngine
+from kevin_hype_liquidity_core import APP_NAME, KevinHypeConfig, KevinHypeLiquidityEngine
 
 try:
     from hyperliquid.utils import constants
@@ -184,14 +183,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_config(args: argparse.Namespace) -> MMStrategyConfig:
+def build_config(args: argparse.Namespace) -> KevinHypeConfig:
     fee_user_fee_source = args.fee_user_fee_source
     if (
         fee_user_fee_source == DEFAULT_FEE_USER_FEE_SOURCE
         and (args.maker_fee_pct_override is not None or args.taker_fee_pct_override is not None)
     ):
         fee_user_fee_source = "manual_account_rates"
-    return MMStrategyConfig(
+    return KevinHypeConfig(
         account_balance=args.account_balance,
         leverage=args.leverage,
         sample_ms=args.sample_ms,
