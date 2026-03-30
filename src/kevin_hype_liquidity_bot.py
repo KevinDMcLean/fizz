@@ -70,14 +70,25 @@ DEFAULT_COOLDOWN_SECONDS = 1.5
 DEFAULT_MAX_DAILY_LOSS = 45.0
 DEFAULT_MAX_EPISODES_PER_DAY = 0
 DEFAULT_MAX_EPISODES_PER_HOUR = 0
+DEFAULT_MAX_LONG_EPISODES_PER_DAY = 900
+DEFAULT_MAX_SHORT_EPISODES_PER_DAY = 1200
+DEFAULT_MAX_LONG_EPISODES_PER_HOUR = 140
+DEFAULT_MAX_SHORT_EPISODES_PER_HOUR = 180
 DEFAULT_STOP_QUOTING_ON_EVENT = False
 DEFAULT_SIZE_TOXICITY_PENALTY = 0.24
 DEFAULT_SIZE_VOL_PENALTY = 0.12
 DEFAULT_SIZE_SPREAD_PENALTY = 0.08
 DEFAULT_SIZE_INVENTORY_PENALTY = 0.22
 DEFAULT_LARGE_INVENTORY_PROTECTION_RATIO = 0.48
+DEFAULT_LONG_ENTRY_VETO_FLOW_IMBALANCE = 0.62
+DEFAULT_LONG_ENTRY_VETO_IMPULSE_BPS = 1.60
+DEFAULT_LONG_ENTRY_VETO_TOXICITY = 0.82
 DEFAULT_SLIPPAGE_BPS = 0.8
 DEFAULT_FEE_BPS = 0.0
+DEFAULT_FEE_BUFFER_BPS = 0.08
+DEFAULT_FEE_KILL_BUFFER_BPS = 0.20
+DEFAULT_EXPECTED_TAKER_SHARE_FLOOR = 0.015
+DEFAULT_FEE_USER_FEE_SOURCE = "estimated_schedule"
 DEFAULT_EVENTS_JSONL = "logs/kevin_hype_events.jsonl"
 DEFAULT_SAMPLES_JSONL = "logs/kevin_hype_samples.jsonl"
 DEFAULT_FILLS_CSV = "logs/kevin_hype_fills.csv"
@@ -146,9 +157,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-daily-loss", type=float, default=DEFAULT_MAX_DAILY_LOSS)
     parser.add_argument("--max-episodes-per-day", type=int, default=DEFAULT_MAX_EPISODES_PER_DAY)
     parser.add_argument("--max-episodes-per-hour", type=int, default=DEFAULT_MAX_EPISODES_PER_HOUR)
+    parser.add_argument("--max-long-episodes-per-day", type=int, default=DEFAULT_MAX_LONG_EPISODES_PER_DAY)
+    parser.add_argument("--max-short-episodes-per-day", type=int, default=DEFAULT_MAX_SHORT_EPISODES_PER_DAY)
+    parser.add_argument("--max-long-episodes-per-hour", type=int, default=DEFAULT_MAX_LONG_EPISODES_PER_HOUR)
+    parser.add_argument("--max-short-episodes-per-hour", type=int, default=DEFAULT_MAX_SHORT_EPISODES_PER_HOUR)
     parser.add_argument("--stop-quoting-on-event", action=argparse.BooleanOptionalAction, default=DEFAULT_STOP_QUOTING_ON_EVENT)
+    parser.add_argument("--long-entry-veto-flow-imbalance", type=float, default=DEFAULT_LONG_ENTRY_VETO_FLOW_IMBALANCE)
+    parser.add_argument("--long-entry-veto-impulse-bps", type=float, default=DEFAULT_LONG_ENTRY_VETO_IMPULSE_BPS)
+    parser.add_argument("--long-entry-veto-toxicity", type=float, default=DEFAULT_LONG_ENTRY_VETO_TOXICITY)
     parser.add_argument("--slippage-bps", type=float, default=DEFAULT_SLIPPAGE_BPS)
     parser.add_argument("--fee-bps", type=float, default=DEFAULT_FEE_BPS)
+    parser.add_argument("--fee-buffer-bps", type=float, default=DEFAULT_FEE_BUFFER_BPS)
+    parser.add_argument("--fee-kill-buffer-bps", type=float, default=DEFAULT_FEE_KILL_BUFFER_BPS)
+    parser.add_argument("--expected-taker-share-floor", type=float, default=DEFAULT_EXPECTED_TAKER_SHARE_FLOOR)
+    parser.add_argument("--account-address", default="")
+    parser.add_argument("--maker-fee-pct-override", type=float, default=None)
+    parser.add_argument("--taker-fee-pct-override", type=float, default=None)
+    parser.add_argument("--maker-rebate-bps-override", type=float, default=0.0)
+    parser.add_argument("--fee-user-fee-source", default=DEFAULT_FEE_USER_FEE_SOURCE)
     parser.add_argument("--events-jsonl", default=DEFAULT_EVENTS_JSONL)
     parser.add_argument("--samples-jsonl", default=DEFAULT_SAMPLES_JSONL)
     parser.add_argument("--fills-csv", default=DEFAULT_FILLS_CSV)
@@ -159,6 +185,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_config(args: argparse.Namespace) -> MMStrategyConfig:
+    fee_user_fee_source = args.fee_user_fee_source
+    if (
+        fee_user_fee_source == DEFAULT_FEE_USER_FEE_SOURCE
+        and (args.maker_fee_pct_override is not None or args.taker_fee_pct_override is not None)
+    ):
+        fee_user_fee_source = "manual_account_rates"
     return MMStrategyConfig(
         account_balance=args.account_balance,
         leverage=args.leverage,
@@ -223,16 +255,16 @@ def build_config(args: argparse.Namespace) -> MMStrategyConfig:
         fee_initial_14d_perps_volume=0.0,
         fee_initial_14d_spot_volume=0.0,
         fee_taker_referral_discount_pct=0.0,
-        fee_maker_rebate_bps_override=0.0,
+        fee_maker_rebate_bps_override=args.maker_rebate_bps_override,
         fee_deployer_fee_scale=0.0,
         fee_growth_mode=False,
         fee_aligned_quote_token=False,
-        fee_user_address="",
-        fee_user_maker_rate_pct_override=None,
-        fee_user_taker_rate_pct_override=None,
-        fee_buffer_bps=0.0,
-        fee_kill_buffer_bps=0.0,
-        expected_taker_share_floor=0.0,
+        fee_user_address=args.account_address,
+        fee_user_maker_rate_pct_override=args.maker_fee_pct_override,
+        fee_user_taker_rate_pct_override=args.taker_fee_pct_override,
+        fee_buffer_bps=args.fee_buffer_bps,
+        fee_kill_buffer_bps=args.fee_kill_buffer_bps,
+        expected_taker_share_floor=args.expected_taker_share_floor,
         tier_volume_boost_multiplier=0.0,
         tier_volume_relaxation_multiplier=0.0,
         size_toxicity_penalty=DEFAULT_SIZE_TOXICITY_PENALTY,
@@ -242,6 +274,14 @@ def build_config(args: argparse.Namespace) -> MMStrategyConfig:
         large_inventory_protection_ratio=DEFAULT_LARGE_INVENTORY_PROTECTION_RATIO,
         fee_bps=args.fee_bps,
         slippage_bps=args.slippage_bps,
+        max_long_episodes_per_day=args.max_long_episodes_per_day,
+        max_short_episodes_per_day=args.max_short_episodes_per_day,
+        max_long_episodes_per_hour=args.max_long_episodes_per_hour,
+        max_short_episodes_per_hour=args.max_short_episodes_per_hour,
+        fee_user_fee_source=fee_user_fee_source,
+        long_entry_veto_flow_imbalance=args.long_entry_veto_flow_imbalance,
+        long_entry_veto_impulse_bps=args.long_entry_veto_impulse_bps,
+        long_entry_veto_toxicity=args.long_entry_veto_toxicity,
     )
 
 

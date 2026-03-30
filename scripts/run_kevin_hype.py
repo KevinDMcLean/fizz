@@ -50,6 +50,19 @@ def main() -> int:
     )
 
     bot_config = base_bot_config(account_config, profile_config)
+    for key in (
+        "account_address",
+        "maker_fee_pct_override",
+        "taker_fee_pct_override",
+        "maker_rebate_bps_override",
+    ):
+        if key in account_config:
+            bot_config[key] = account_config[key]
+    if (
+        "fee_user_fee_source" not in bot_config
+        and ("maker_fee_pct_override" in bot_config or "taker_fee_pct_override" in bot_config)
+    ):
+        bot_config["fee_user_fee_source"] = "manual_account_rates"
     bot_config.update(
         {
             "events_jsonl": str(paths["events_jsonl"]),

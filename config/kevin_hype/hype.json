@@ -56,7 +56,17 @@
   "max_daily_loss": 45.0,
   "max_episodes_per_day": 0,
   "max_episodes_per_hour": 0,
+  "max_long_episodes_per_day": 900,
+  "max_short_episodes_per_day": 1200,
+  "max_long_episodes_per_hour": 140,
+  "max_short_episodes_per_hour": 180,
   "stop_quoting_on_event": false,
+  "long_entry_veto_flow_imbalance": 0.62,
+  "long_entry_veto_impulse_bps": 1.6,
+  "long_entry_veto_toxicity": 0.82,
   "slippage_bps": 0.8,
-  "fee_bps": 0.0
+  "fee_bps": 0.0,
+  "fee_buffer_bps": 0.08,
+  "fee_kill_buffer_bps": 0.20,
+  "expected_taker_share_floor": 0.015
 }

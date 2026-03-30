@@ -11,7 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from atlas_mm_feeaware_core import MMStrategyConfig, MarketFeatures
-from kevin_hype_liquidity_core import build_kevin_quote_plan, zero_fee_state
+from kevin_hype_liquidity_core import build_kevin_quote_plan, enforce_kevin_entry_guards, zero_fee_state
 from pa_pump_pro_core import BookSnapshot
 
 
@@ -253,6 +253,46 @@ class KevinHypeLiquidityCoreTests(unittest.TestCase):
         self.assertGreater(plan.ask_size, 0.0)
         self.assertLessEqual(plan.ask_size, base_qty * 0.60)
 
+    def test_flat_long_entry_veto_disables_bid_when_bearish_flow_flips(self) -> None:
+        features = self._features()
+        features.flow_imbalance = -0.86
+        features.book_imbalance = 0.20
+        features.impulse_bps = -2.8
+        features.toxicity_score = 0.94
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quote_mode, "ask_only")
+        self.assertFalse(plan.bid_enabled)
+        self.assertTrue(plan.ask_enabled)
+        self.assertEqual(plan.bid_reason, "long_adverse_veto")
+        self.assertIn("long_veto=", plan.decision_note)
+
+    def test_entry_side_limits_disable_blocked_flat_side(self) -> None:
+        plan = build_kevin_quote_plan(
+            features=self._features(),
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        guarded = enforce_kevin_entry_guards(
+            plan=plan,
+            inventory_qty=0.0,
+            bid_block_reason="long_hourly_episode_limit",
+        )
+        self.assertTrue(guarded.quoting_enabled)
+        self.assertEqual(guarded.quote_mode, "ask_only")
+        self.assertFalse(guarded.bid_enabled)
+        self.assertTrue(guarded.ask_enabled)
+        self.assertEqual(guarded.bid_reason, "long_hourly_episode_limit")
+        self.assertIn("entry_guard", guarded.decision_note)
+
     def _features(self) -> MarketFeatures:
         return MarketFeatures(
             sample_exchange_time_ms=1_000,
@@ -374,6 +414,14 @@ class KevinHypeLiquidityCoreTests(unittest.TestCase):
             large_inventory_protection_ratio=0.48,
             fee_bps=0.0,
             slippage_bps=0.8,
+            max_long_episodes_per_day=900,
+            max_short_episodes_per_day=1200,
+            max_long_episodes_per_hour=140,
+            max_short_episodes_per_hour=180,
+            fee_user_fee_source="manual_account_rates",
+            long_entry_veto_flow_imbalance=0.62,
+            long_entry_veto_impulse_bps=1.60,
+            long_entry_veto_toxicity=0.82,
         )
 
 

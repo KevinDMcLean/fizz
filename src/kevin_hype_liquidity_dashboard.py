@@ -131,6 +131,90 @@ def _mean(values: List[float]) -> float | None:
     return sum(values) / len(values)
 
 
+def _trade_turnover_notional(row: Dict[str, Any]) -> float:
+    entry_price = _to_float(row.get("entry_price_avg")) or 0.0
+    exit_price = _to_float(row.get("exit_price_avg")) or 0.0
+    qty = abs(_to_float(row.get("max_abs_qty")) or 0.0)
+    return (entry_price + exit_price) * qty
+
+
+def _loss_bucket_label(bucket: str) -> str:
+    labels = {
+        "immediate_adverse_entry": "Immediate adverse entry",
+        "immediate_kill_markout": "Immediate kill markout",
+        "kill_markout": "Kill markout",
+        "kill_timeout": "Kill timeout",
+        "kill_toxic_reversal": "Kill toxic reversal",
+        "slow_bleed": "Slow bleed",
+        "never_worked": "Never worked",
+        "long_flow_flip": "Long flow flip",
+        "short_flow_flip": "Short flow flip",
+        "other_loss": "Other loss",
+    }
+    return labels.get(bucket, bucket.replace("_", " "))
+
+
+def _classify_loss_bucket(row: Dict[str, Any]) -> str | None:
+    realized_pnl = _to_float(row.get("realized_pnl")) or 0.0
+    if realized_pnl >= 0.0:
+        return None
+    close_reason = str(row.get("close_reason") or "")
+    hold_seconds = _to_float(row.get("hold_seconds")) or 0.0
+    best_markout_bps = _to_float(row.get("best_markout_bps")) or 0.0
+    worst_markout_bps = _to_float(row.get("worst_markout_bps")) or 0.0
+    side = str(row.get("side") or "").upper()
+
+    if close_reason == "kill_timeout":
+        return "kill_timeout"
+    if close_reason == "kill_toxic_reversal":
+        return "kill_toxic_reversal"
+    if close_reason == "kill_markout":
+        return "immediate_kill_markout" if hold_seconds <= 0.25 else "kill_markout"
+    if hold_seconds <= 0.35:
+        return "immediate_adverse_entry"
+    if hold_seconds >= 8.0:
+        return "slow_bleed"
+    if best_markout_bps <= 0.10 and worst_markout_bps <= -0.75:
+        return "never_worked"
+    if side == "LONG":
+        return "long_flow_flip"
+    if side == "SHORT":
+        return "short_flow_flip"
+    return "other_loss"
+
+
+def _summarize_loss_buckets(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for row in trades:
+        bucket = _classify_loss_bucket(row)
+        if bucket is None:
+            continue
+        item = buckets.setdefault(
+            bucket,
+            {
+                "bucket": bucket,
+                "label": _loss_bucket_label(bucket),
+                "count": 0,
+                "realized_pnl": 0.0,
+                "turnover_notional": 0.0,
+                "long_count": 0,
+                "short_count": 0,
+            },
+        )
+        item["count"] += 1
+        item["realized_pnl"] += _to_float(row.get("realized_pnl")) or 0.0
+        item["turnover_notional"] += _trade_turnover_notional(row)
+        if str(row.get("side") or "").upper() == "LONG":
+            item["long_count"] += 1
+        elif str(row.get("side") or "").upper() == "SHORT":
+            item["short_count"] += 1
+    return sorted(
+        buckets.values(),
+        key=lambda item: (abs(float(item["realized_pnl"])), int(item["count"])),
+        reverse=True,
+    )
+
+
 def _compute_size_metrics(
     samples: List[Dict[str, Any]],
     fills: List[Dict[str, Any]],
@@ -191,10 +275,7 @@ def _compute_size_metrics(
     flats = sum(1 for value in realized if value == 0)
     closed_turnover = 0.0
     for row in trades:
-        entry_price = _to_float(row.get("entry_price_avg")) or 0.0
-        exit_price = _to_float(row.get("exit_price_avg")) or 0.0
-        qty = abs(_to_float(row.get("max_abs_qty")) or 0.0)
-        closed_turnover += (entry_price + exit_price) * qty
+        closed_turnover += _trade_turnover_notional(row)
 
     fill_turnover = sum(abs((_to_float(row.get("price")) or 0.0) * (_to_float(row.get("size")) or 0.0)) for row in fills)
     fill_units = sum(abs(_to_float(row.get("size")) or 0.0) for row in fills)
@@ -438,6 +519,8 @@ def build_summary(
     fill_fee_drag_total = sum((_to_float(row.get("exchange_fee_delta")) or 0.0) for row in current_fills)
     fill_fee_cost_total = sum(max((_to_float(row.get("exchange_fee_delta")) or 0.0), 0.0) for row in current_fills)
     fill_rebate_total = sum(max(-((_to_float(row.get("exchange_fee_delta")) or 0.0)), 0.0) for row in current_fills)
+    gross_total_pnl = total_pnl + fill_fee_drag_total
+    open_fee_drag_total = fill_fee_drag_total - closed_fee_drag_total
     closed_turnover_notional = size_metrics.get("closed_turnover_notional") or 0.0
     fill_turnover_notional = size_metrics.get("fill_turnover_notional") or 0.0
     gross_edge_bps = ((gross_realized_pnl_total / closed_turnover_notional) * 10_000.0) if closed_turnover_notional else 0.0
@@ -459,18 +542,20 @@ def build_summary(
     ]
     passive_realized_pnl_total = sum((_to_float(row.get("realized_pnl")) or 0.0) for row in passive_trades)
     kill_realized_pnl_total = sum((_to_float(row.get("realized_pnl")) or 0.0) for row in kill_trades)
-    passive_closed_turnover = sum(
-        ((_to_float(row.get("entry_price_avg")) or 0.0) + (_to_float(row.get("exit_price_avg")) or 0.0))
-        * abs(_to_float(row.get("max_abs_qty")) or 0.0)
-        for row in passive_trades
-    )
-    kill_closed_turnover = sum(
-        ((_to_float(row.get("entry_price_avg")) or 0.0) + (_to_float(row.get("exit_price_avg")) or 0.0))
-        * abs(_to_float(row.get("max_abs_qty")) or 0.0)
-        for row in kill_trades
-    )
+    passive_closed_turnover = sum(_trade_turnover_notional(row) for row in passive_trades)
+    kill_closed_turnover = sum(_trade_turnover_notional(row) for row in kill_trades)
     passive_edge_bps = ((passive_realized_pnl_total / passive_closed_turnover) * 10_000.0) if passive_closed_turnover else 0.0
     kill_edge_bps = ((kill_realized_pnl_total / kill_closed_turnover) * 10_000.0) if kill_closed_turnover else 0.0
+    long_trades = [row for row in current_trades if str(row.get("side") or "").upper() == "LONG"]
+    short_trades = [row for row in current_trades if str(row.get("side") or "").upper() == "SHORT"]
+    long_loss_trades = [row for row in long_trades if (_to_float(row.get("realized_pnl")) or 0.0) < 0.0]
+    short_loss_trades = [row for row in short_trades if (_to_float(row.get("realized_pnl")) or 0.0) < 0.0]
+    long_loss_pnl_total = sum((_to_float(row.get("realized_pnl")) or 0.0) for row in long_loss_trades)
+    short_loss_pnl_total = sum((_to_float(row.get("realized_pnl")) or 0.0) for row in short_loss_trades)
+    long_loss_turnover_total = sum(_trade_turnover_notional(row) for row in long_loss_trades)
+    short_loss_turnover_total = sum(_trade_turnover_notional(row) for row in short_loss_trades)
+    loss_buckets = _summarize_loss_buckets(current_trades)
+    top_loss_bucket = loss_buckets[0] if loss_buckets else None
     fee_tier = str(latest_sample.get("fee_tier_label") or "n/a")
     fee_actual_tier = str(latest_sample.get("fee_actual_tier_label") or "n/a")
     fee_projected_tier = str(latest_sample.get("fee_projected_tier_label") or "n/a")
@@ -546,6 +631,13 @@ def build_summary(
         if fee_rate_source == "manual_account_rates"
         else "exact market scaling, account tier estimated from local run-rate"
     )
+    fee_mode_label = (
+        "manual account fee rates"
+        if fee_rate_source == "manual_account_rates"
+        else "live userFees account rates"
+        if fee_rate_source == "userFees"
+        else "estimated fee schedule"
+    )
 
     current_run = {
         "start_utc": last_started.get("timestamp_utc") if last_started else None,
@@ -559,9 +651,11 @@ def build_summary(
         "realized_pnl_total": realized_pnl_total,
         "gross_realized_pnl_total": gross_realized_pnl_total,
         "inventory_unrealized_pnl": inventory_unrealized,
+        "gross_total_pnl": gross_total_pnl,
         "total_pnl": total_pnl,
         "closed_fee_drag_total": closed_fee_drag_total,
         "fill_fee_drag_total": fill_fee_drag_total,
+        "open_fee_drag_total": open_fee_drag_total,
         "fill_fee_cost_total": fill_fee_cost_total,
         "fill_rebate_total": fill_rebate_total,
         "maker_fee_cost_total": maker_fee_cost_total,
@@ -586,6 +680,16 @@ def build_summary(
         "kill_edge_bps": kill_edge_bps,
         "kill_episode_count": len(kill_trades),
         "passive_episode_count": len(passive_trades),
+        "long_episode_count": len(long_trades),
+        "short_episode_count": len(short_trades),
+        "long_loss_count": len(long_loss_trades),
+        "short_loss_count": len(short_loss_trades),
+        "long_loss_pnl_total": long_loss_pnl_total,
+        "short_loss_pnl_total": short_loss_pnl_total,
+        "long_loss_turnover_total": long_loss_turnover_total,
+        "short_loss_turnover_total": short_loss_turnover_total,
+        "loss_buckets": loss_buckets,
+        "top_loss_bucket": top_loss_bucket,
         "polling_errors": sum(1 for row in current_events if row.get("event") == "polling_error"),
         "stale_quote_skips": sum(1 for row in current_events if row.get("event") == "stale_quote_skipped"),
         "quote_gap_warnings": sum(1 for row in current_events if row.get("event") == "quote_gap_warning"),
@@ -612,6 +716,10 @@ def build_summary(
         "configured_max_inventory_notional": max_inventory_notional,
         "configured_account_balance": account_balance,
         "configured_leverage": leverage,
+        "configured_max_long_episodes_per_day": _to_float(last_started.get("max_long_episodes_per_day")) if last_started else None,
+        "configured_max_short_episodes_per_day": _to_float(last_started.get("max_short_episodes_per_day")) if last_started else None,
+        "configured_max_long_episodes_per_hour": _to_float(last_started.get("max_long_episodes_per_hour")) if last_started else None,
+        "configured_max_short_episodes_per_hour": _to_float(last_started.get("max_short_episodes_per_hour")) if last_started else None,
         "fee_tier_label": fee_tier,
         "fee_actual_tier_label": fee_actual_tier,
         "fee_projected_tier_label": fee_projected_tier,
@@ -619,6 +727,7 @@ def build_summary(
         "fee_staking_tier": fee_staking_tier,
         "fee_basis": fee_basis,
         "fee_rate_source": fee_rate_source,
+        "fee_mode_label": fee_mode_label,
         "fee_maker_rate_bps": fee_maker_rate_bps,
         "fee_taker_rate_bps": fee_taker_rate_bps,
         "fee_maker_rebate_bps": fee_maker_rebate_bps,
@@ -644,6 +753,7 @@ def build_summary(
         "fee_target_tier_progress_pct": fee_target_tier_progress_pct,
         "fee_days_to_next_tier": fee_days_to_next_tier,
         "fee_precision_note": fee_precision_note,
+        "shadow_fee_accounting": bool(last_started.get("shadow_fee_accounting")) if last_started else False,
         "volume_boost_multiplier": volume_boost_multiplier,
         "quote_mode_counts": dict(quote_mode_counts),
         "quote_reason_counts": dict(quote_reason_counts),
@@ -671,7 +781,7 @@ def build_summary(
             "quote_reason": latest_sample.get("quoting_reason"),
             "bid_reason": latest_sample.get("bid_reason"),
             "ask_reason": latest_sample.get("ask_reason"),
-            "data_source": "websocket bbo + l2Book + trades | Kevin no-cost demo",
+            "data_source": f"websocket bbo + l2Book + trades | Kevin fee-aware fills ({fee_mode_label})",
         },
         "recent_fills": current_fills[-20:],
         "recent_trades": current_trades[-20:],
@@ -938,6 +1048,28 @@ def render_html() -> str:
       return num.toFixed(digits);
     };
 
+    const pct = (value, digits = 3) => {
+      if (value === null || value === undefined || value === '') return 'n/a';
+      const num = Number(value);
+      if (Number.isNaN(num)) return String(value);
+      return `${num.toFixed(digits)}%`;
+    };
+
+    const usd = (value, digits = 2) => {
+      if (value === null || value === undefined || value === '') return 'n/a';
+      const num = Number(value);
+      if (Number.isNaN(num)) return String(value);
+      const sign = num < 0 ? '-' : '';
+      return `${sign}$${Math.abs(num).toFixed(digits)}`;
+    };
+
+    const marginPct = (pnl, turnover) => {
+      const pnlNum = Number(pnl || 0);
+      const turnoverNum = Number(turnover || 0);
+      if (!Number.isFinite(turnoverNum) || Math.abs(turnoverNum) < 1e-9) return null;
+      return (pnlNum / turnoverNum) * 100;
+    };
+
     const cls = (value, kind = 'default', context = {}) => {
       if (kind === 'pnl') return Number(value) >= 0 ? 'good' : 'bad';
       if (kind === 'state') {
@@ -1079,7 +1211,7 @@ def render_html() -> str:
         <path d="${pathFor(totalValues)}" fill="none" stroke="#7ee0a5" stroke-width="2.4" />
       `;
       summary.textContent =
-        `range ${fmt(minY, 4)} to ${fmt(maxY, 4)} | gross ${fmt(grossValues[grossValues.length - 1], 4)} | net ${fmt(netValues[netValues.length - 1], 4)} | total ${fmt(totalValues[totalValues.length - 1], 4)}`;
+        `range ${usd(minY, 4)} to ${usd(maxY, 4)} | gross ${usd(grossValues[grossValues.length - 1], 4)} | net ${usd(netValues[netValues.length - 1], 4)} | total ${usd(totalValues[totalValues.length - 1], 4)}`;
     };
 
     async function refresh() {
@@ -1099,14 +1231,42 @@ def render_html() -> str:
       const netRealized = Number(cur.realized_pnl_total || 0);
       const netTotal = Number(cur.total_pnl || 0);
       const feeDrag = Number(cur.fill_fee_drag_total || 0);
+      const grossTotal = Number(cur.gross_total_pnl || (netTotal + feeDrag));
+      const closedFeeDrag = Number(cur.closed_fee_drag_total || 0);
+      const openFeeDrag = Number(cur.open_fee_drag_total || 0);
       const makerShare = Number(cur.maker_share_pct || 0);
       const takerShare = Number(cur.taker_share_pct || 0);
       const leverage = Number(cur.configured_leverage || 0);
+      const latestClosed = (data.recent_trades || [])[data.recent_trades.length - 1] || {};
+      const topLossBucket = (cur.loss_buckets || [])[0] || null;
       const fillTurnover = Number(size.fill_turnover_notional || 0);
       const closedTurnover = Number(size.closed_turnover_notional || 0);
+      const closedEpisodes = Number(cur.closed_episodes || 0);
+      const fillsCount = Number(cur.fills_count || 0);
+      const avgGrossPerClosedTrade = closedEpisodes > 0 ? grossRealized / closedEpisodes : null;
+      const avgNetPerClosedTrade = closedEpisodes > 0 ? netRealized / closedEpisodes : null;
+      const avgClosedTurnoverPerTrade = closedEpisodes > 0 ? closedTurnover / closedEpisodes : null;
+      const avgFillNotional = fillsCount > 0 ? fillTurnover / fillsCount : null;
+      const grossTotalMarginPct = marginPct(grossTotal, fillTurnover);
+      const netTotalMarginPct = marginPct(netTotal, fillTurnover);
+      const grossClosedMarginPct = marginPct(grossRealized, closedTurnover);
+      const netClosedMarginPct = marginPct(netRealized, closedTurnover);
+      const feeDragMarginPct = marginPct(feeDrag, fillTurnover);
+      const inventoryNotional = Math.abs(Number(sample.inventory_qty || 0) * Number(sample.mid || 0));
+      const unrealizedMarginPct = marginPct(cur.inventory_unrealized_pnl, inventoryNotional);
+      const passiveTurnover = Number(cur.passive_closed_turnover || 0);
+      const killTurnover = Number(cur.kill_closed_turnover || 0);
+      const passiveMarginPct = marginPct(cur.passive_realized_pnl_total, passiveTurnover);
+      const killMarginPct = marginPct(cur.kill_realized_pnl_total, killTurnover);
+      const longLossTurnover = Number(cur.long_loss_turnover_total || 0);
+      const shortLossTurnover = Number(cur.short_loss_turnover_total || 0);
+      const longLossMarginPct = marginPct(cur.long_loss_pnl_total, longLossTurnover);
+      const shortLossMarginPct = marginPct(cur.short_loss_pnl_total, shortLossTurnover);
+      const topLossBucketTurnover = Number((topLossBucket && topLossBucket.turnover_notional) || 0);
+      const topLossBucketMarginPct = marginPct(topLossBucket && topLossBucket.realized_pnl, topLossBucketTurnover);
       const feeBasis = cur.fee_basis || 'n/a';
+      const feeModeLabel = cur.fee_mode_label || feeBasis;
       const profitFactor = cur.profit_factor;
-      const latestClosed = (data.recent_trades || [])[data.recent_trades.length - 1] || {};
       const cap = capReason(sample, cur);
       const behaviour = behaviourVerdict(sample, cur, cap);
 
@@ -1121,14 +1281,17 @@ def render_html() -> str:
       document.getElementById('hero-stats').innerHTML =
         metric('Run State', data.run_state || 'unknown', 'engine state', cls(data.run_state, 'state')) +
         metric('Quote Mode', sample.quote_mode || 'n/a', sample.quoting_reason || 'n/a', sample.quoting_enabled ? 'good' : 'warn') +
-        metric('Net Total PnL', fmt(netTotal, 4), `net closed ${fmt(netRealized, 4)} / unrl ${fmt(cur.inventory_unrealized_pnl, 4)}`, cls(netTotal, 'pnl')) +
-        metric('Closed Realised PnL', fmt(netRealized, 4), `closed episodes ${fmt(cur.closed_episodes, 0)} | gross ${fmt(grossRealized, 4)}`, cls(netRealized, 'pnl')) +
+        metric('Gross Total PnL', usd(grossTotal, 4), `margin ${pct(grossTotalMarginPct, 3)} on ${usd(fillTurnover, 0)} traded | before fees/rebates`, cls(grossTotal, 'pnl')) +
+        metric('Net Total PnL', usd(netTotal, 4), `margin ${pct(netTotalMarginPct, 3)} on ${usd(fillTurnover, 0)} traded | unrl ${usd(cur.inventory_unrealized_pnl, 4)}`, cls(netTotal, 'pnl')) +
+        metric('Gross Closed PnL', usd(grossRealized, 4), `margin ${pct(grossClosedMarginPct, 3)} on ${usd(closedTurnover, 0)} closed turnover | ${fmt(cur.closed_episodes, 0)} episodes`, cls(grossRealized, 'pnl')) +
+        metric('Net Closed PnL', usd(netRealized, 4), `margin ${pct(netClosedMarginPct, 3)} on ${usd(closedTurnover, 0)} closed turnover | drag ${usd(closedFeeDrag, 4)}`, cls(netRealized, 'pnl')) +
+        metric('All Fee Drag', usd(feeDrag, 4), `drag ${pct(feeDragMarginPct, 3)} on ${usd(fillTurnover, 0)} traded | open ${usd(openFeeDrag, 4)}`, feeDrag > 0 ? 'warn' : 'good') +
         metric('Inventory', `${sample.inventory_side || 'FLAT'} ${fmt(sample.inventory_qty, 4)}`, `mark ${fmt(sample.inventory_unrealized_bps, 2)} bps`, sample.inventory_side === 'FLAT' ? 'warn' : 'good') +
         metric('Cap Reason', cap.headline, cap.detail, 'warn') +
-        metric('Buying Power', `$${fmt(size.buying_power, 0)}`, `equity $${fmt(cur.configured_account_balance, 0)} at ${fmt(leverage, 0)}x`);
+        metric('Buying Power', usd(size.buying_power, 0), `equity ${usd(cur.configured_account_balance, 0)} at ${fmt(leverage, 0)}x`);
 
       document.getElementById('market').innerHTML =
-        metric('Bid / Ask', `${fmt(sample.bid, 4)} / ${fmt(sample.ask, 4)}`, `mid ${fmt(sample.mid, 4)} micro ${fmt(sample.microprice, 4)}`) +
+        metric('Bid / Ask', `${usd(sample.bid, 4)} / ${usd(sample.ask, 4)}`, `mid ${usd(sample.mid, 4)} micro ${usd(sample.microprice, 4)}`) +
         metric('Spread bps', fmt(cur.current_spread_bps, 3), `p50 ${fmt(cur.p50_spread_bps, 3)} | p95 ${fmt(cur.p95_spread_bps, 3)} | max ${fmt(cur.max_spread_bps_seen, 3)}`, cls(cur.current_spread_bps, 'spread', {limit: cur.configured_max_spread_bps})) +
         metric('Quote Age ms', fmt(cur.current_quote_age_ms, 0), `p50 ${fmt(cur.p50_quote_age_ms, 0)} | p95 ${fmt(cur.p95_quote_age_ms, 0)} | max ${fmt(cur.max_quote_age_ms_seen, 0)}`, cls(cur.current_quote_age_ms, 'latency', {limit: cur.configured_max_quote_age_ms})) +
         metric('Transport ms', fmt(cur.current_transport_delay_ms, 0), `p50 ${fmt(cur.p50_transport_delay_ms, 0)} | p95 ${fmt(cur.p95_transport_delay_ms, 0)} | max ${fmt(cur.max_transport_delay_ms, 0)}`, cls(cur.current_transport_delay_ms, 'latency', {limit: cur.configured_max_quote_age_ms})) +
@@ -1141,20 +1304,21 @@ def render_html() -> str:
 
       document.getElementById('quotes').innerHTML =
         metric('Quote Reason', sample.quoting_reason || 'n/a', decision.note || '', sample.quoting_enabled ? 'good' : 'warn') +
-        metric('Bid Side', sample.bid_enabled ? (sample.bid_quote_price ? fmt(sample.bid_quote_price, 4) : 'enabled') : 'off', sample.bid_reason || 'n/a', sample.bid_enabled ? 'good' : 'warn') +
-        metric('Ask Side', sample.ask_enabled ? (sample.ask_quote_price ? fmt(sample.ask_quote_price, 4) : 'enabled') : 'off', sample.ask_reason || 'n/a', sample.ask_enabled ? 'good' : 'warn') +
-        metric('Base / Max Notional', `${fmt(cur.configured_base_order_notional, 0)} / ${fmt(cur.configured_max_quote_notional, 0)}`, `per side base / quote cap, inventory cap $${fmt(cur.configured_max_inventory_notional, 0)}`) +
-        metric('Active Quote Notional', `${fmt(size.active_quote_avg_notional, 0)} avg`, `p95 ${fmt(size.active_quote_p95_notional, 0)} | max ${fmt(size.active_quote_max_notional, 0)}`) +
-        metric('Target Quote Size', `${fmt(sample.bid_quote_size, 4)} / ${fmt(sample.ask_quote_size, 4)}`, `notional ${fmt(bidQuoteNotional, 2)} / ${fmt(askQuoteNotional, 2)}`) +
-        metric('Live Quote Notional', `${fmt(liveBidNotional, 2)} / ${fmt(liveAskNotional, 2)}`, 'live bid / ask on the book now') +
+        metric('Bid Side', sample.bid_enabled ? (sample.bid_quote_price ? usd(sample.bid_quote_price, 4) : 'enabled') : 'off', sample.bid_reason || 'n/a', sample.bid_enabled ? 'good' : 'warn') +
+        metric('Ask Side', sample.ask_enabled ? (sample.ask_quote_price ? usd(sample.ask_quote_price, 4) : 'enabled') : 'off', sample.ask_reason || 'n/a', sample.ask_enabled ? 'good' : 'warn') +
+        metric('Base / Max Notional', `${usd(cur.configured_base_order_notional, 0)} / ${usd(cur.configured_max_quote_notional, 0)}`, `per side base / quote cap, inventory cap ${usd(cur.configured_max_inventory_notional, 0)}`) +
+        metric('Active Quote Notional', `${usd(size.active_quote_avg_notional, 0)} avg`, `p95 ${usd(size.active_quote_p95_notional, 0)} | max ${usd(size.active_quote_max_notional, 0)}`) +
+        metric('Target Quote Size', `${fmt(sample.bid_quote_size, 4)} / ${fmt(sample.ask_quote_size, 4)}`, `notional ${usd(bidQuoteNotional, 2)} / ${usd(askQuoteNotional, 2)}`) +
+        metric('Live Quote Notional', `${usd(liveBidNotional, 2)} / ${usd(liveAskNotional, 2)}`, 'live bid / ask on the book now') +
         metric('Size Risk Mult', `${fmt(sample.size_risk_multiplier, 2)}x`, 'risk shrink applied to quote size before posting') +
-        metric('Fair / Reservation', `${fmt(sample.fair_value, 4)} / ${fmt(sample.reservation_price, 4)}`, `alpha ${fmt(sample.alpha_bps, 3)} bps`) +
-        metric('Target Half Spread', fmt(sample.target_half_spread_bps, 3), `inventory skew ${fmt(sample.inventory_skew_bps, 3)} bps | zero-cost Kevin demo`) +
-        metric('Live Bid / Ask', `${fmt(sample.live_bid_order_price, 4)} / ${fmt(sample.live_ask_order_price, 4)}`, `size ${fmt(sample.live_bid_order_size, 4)} / ${fmt(sample.live_ask_order_size, 4)}, notional ${fmt(liveBidNotional, 2)} / ${fmt(liveAskNotional, 2)}`) +
+        metric('Fair / Reservation', `${usd(sample.fair_value, 4)} / ${usd(sample.reservation_price, 4)}`, `alpha ${fmt(sample.alpha_bps, 3)} bps`) +
+        metric('Target Half Spread', fmt(sample.target_half_spread_bps, 3), `inventory skew ${fmt(sample.inventory_skew_bps, 3)} bps | fee mode ${feeModeLabel}`) +
+        metric('Live Bid / Ask', `${usd(sample.live_bid_order_price, 4)} / ${usd(sample.live_ask_order_price, 4)}`, `size ${fmt(sample.live_bid_order_size, 4)} / ${fmt(sample.live_ask_order_size, 4)}, notional ${usd(liveBidNotional, 2)} / ${usd(liveAskNotional, 2)}`) +
         metric('Queue Ahead', `${fmt(sample.bid_queue_ahead_size, 3)} / ${fmt(sample.ask_queue_ahead_size, 3)}`, 'bid / ask') +
-        metric('Passive Fill Size', `$${fmt(size.passive_fill_avg_notional, 0)} avg`, `p95 $${fmt(size.passive_fill_p95_notional, 0)} | max $${fmt(size.passive_fill_max_notional, 0)}`) +
+        metric('Passive Fill Size', `${usd(size.passive_fill_avg_notional, 0)} avg`, `p95 ${usd(size.passive_fill_p95_notional, 0)} | max ${usd(size.passive_fill_max_notional, 0)}`) +
         metric('Touch Share', `${fmt(size.passive_fill_avg_touch_share_pct, 1)}% avg`, `p95 ${fmt(size.passive_fill_p95_touch_share_pct, 1)}% | <=25% on ${fmt(size.passive_fill_under_25pct_touch_pct, 1)}% of passive fills`) +
         metric('Capacity Usage', `${fmt(size.passive_fill_avg_buying_power_pct, 2)}% avg`, `p95 ${fmt(size.passive_fill_p95_buying_power_pct, 2)}% of buying power`) +
+        metric('Side Episode Caps', `long ${fmt(cur.long_episode_count, 0)} / ${fmt(cur.configured_max_long_episodes_per_hour, 0)}`, `short ${fmt(cur.short_episode_count, 0)} / ${fmt(cur.configured_max_short_episodes_per_hour, 0)} per hour`) +
         metric('Quote Modes', `${fmt(modeCounts.both || 0, 0)} both`, `bid-only ${fmt(modeCounts.bid_only || 0, 0)} | ask-only ${fmt(modeCounts.ask_only || 0, 0)} | flat ${fmt(modeCounts.flat || 0, 0)}`) +
         metric('Protection Time', fmt(cur.inventory_protection_samples, 0), `event samples ${fmt(cur.event_regime_samples, 0)}`) +
         metric('Toxicity Score', fmt(sample.toxicity_score, 3), `top reasons ${Object.keys(reasonCounts).slice(0, 3).join(', ') || 'n/a'}`, Number(sample.toxicity_score) >= 1 ? 'warn' : 'good');
@@ -1162,42 +1326,47 @@ def render_html() -> str:
       document.getElementById('execution').innerHTML =
         metric('Passive Fills', fmt(cur.passive_fills, 0), `kill fills ${fmt(cur.kill_fills, 0)} / total fills ${fmt(cur.fills_count, 0)}`) +
         metric('Closed Episodes', fmt(cur.closed_episodes, 0), `win rate ${fmt(cur.win_rate_pct, 2)}%`) +
+        metric('Avg Closed Trade PnL', `${usd(avgGrossPerClosedTrade, 4)} / ${usd(avgNetPerClosedTrade, 4)}`, `gross / net per closed trade | avg turnover ${usd(avgClosedTurnoverPerTrade, 0)}`, cls(avgNetPerClosedTrade, 'pnl')) +
+        metric('Avg Fill Notional', usd(avgFillNotional, 2), `all fills | passive avg ${usd(size.passive_fill_avg_notional, 2)}`) +
         metric('Success Split', `${fmt(size.wins, 0)} / ${fmt(size.losses, 0)} / ${fmt(size.flats, 0)}`, `wins / losses / flat, loss rate ${fmt(size.loss_rate_pct, 2)}%`) +
         metric('Profit Factor', profitFactor === null || profitFactor === undefined ? 'n/a' : fmt(profitFactor, 2), 'gross winning pnl over losing pnl', profitFactor && profitFactor >= 1.5 ? 'good' : 'warn') +
         metric('Avg Hold', fmt(cur.avg_hold_seconds, 3), 'seconds per episode') +
         metric('Best Markout', fmt(cur.avg_best_markout_bps, 3), 'average best bps') +
         metric('Realized Spread', fmt(cur.avg_realized_spread_bps, 3), `gross ${fmt(cur.gross_edge_bps, 3)} bps | net ${fmt(cur.net_edge_bps, 3)} bps`, cls(cur.avg_realized_spread_bps, 'pnl')) +
-        metric('Fill Turnover', `$${fmt(fillTurnover, 0)}`, `${fmt(size.fill_turnover_units, 2)} units traded this run`) +
-        metric('Closed Turnover', `$${fmt(closedTurnover, 0)}`, 'entry plus exit notional across completed episodes') +
+        metric('Fill Turnover', usd(fillTurnover, 0), `${fmt(size.fill_turnover_units, 2)} units traded this run`) +
+        metric('Closed Turnover', usd(closedTurnover, 0), 'entry plus exit notional across completed episodes') +
         metric('Queue At Fill', `${fmt(size.passive_fill_queue_ahead_avg, 1)} avg`, `p95 ${fmt(size.passive_fill_queue_ahead_p95, 1)} ahead`) +
         metric('Thin-Book Outliers', `${fmt(size.passive_fill_over_50pct_touch_count, 0)}`, `passive fills >50% of visible touch; usually a thinning-book edge case`, size.passive_fill_over_50pct_touch_count > 0 ? 'warn' : 'good') +
         metric('Quote Ops', `${fmt(cur.quote_posts, 0)} / ${fmt(cur.quote_replaces, 0)}`, `posts / replaces, cancels ${fmt(cur.quote_cancels, 0)}`) +
         metric('Loop Errors', fmt(cur.polling_errors, 0), `gap warnings ${fmt(cur.quote_gap_warnings, 0)} | reconnects ${fmt(cur.feed_reconnects, 0)}`, cur.polling_errors > 0 ? 'bad' : 'good') +
         metric('Latest Fill', cur.latest_fill.reason || 'n/a', `${cur.latest_fill.liquidity_role || 'n/a'} ${cur.latest_fill.side || ''}`) +
-        metric('Realized PnL', fmt(cur.realized_pnl_total, 4), 'current run closed inventory episodes', cls(cur.realized_pnl_total, 'pnl')) +
-        metric('Unrealized PnL', fmt(cur.inventory_unrealized_pnl, 4), `current run inventory ${sample.inventory_side || 'FLAT'}`, cls(cur.inventory_unrealized_pnl, 'pnl'));
+        metric('Fee Accounting', feeModeLabel, `maker ${fmt(cur.fee_maker_rate_bps, 3)} bps | taker ${fmt(cur.fee_taker_rate_bps, 3)} bps | drag ${usd(feeDrag, 4)}`, feeDrag > 0 ? 'warn' : 'good') +
+        metric('Gross / Net Closed', `${usd(grossRealized, 4)} / ${usd(netRealized, 4)}`, `gross ${pct(grossClosedMarginPct, 3)} / net ${pct(netClosedMarginPct, 3)} on ${usd(closedTurnover, 0)} | drag ${usd(closedFeeDrag, 4)}`, cls(cur.realized_pnl_total, 'pnl')) +
+        metric('Unrealized PnL', usd(cur.inventory_unrealized_pnl, 4), `mark ${pct(unrealizedMarginPct, 3)} on ${usd(inventoryNotional, 0)} inventory | ${sample.inventory_side || 'FLAT'}`, cls(cur.inventory_unrealized_pnl, 'pnl'));
 
       document.getElementById('fees').innerHTML =
-        metric('Buying Power', `$${fmt(size.buying_power, 0)}`, `equity $${fmt(cur.configured_account_balance, 0)} at ${fmt(cur.configured_leverage, 0)}x`) +
-        metric('Max Inventory', `$${fmt(cur.configured_max_inventory_notional, 0)}`, `${fmt(Math.abs(Number(sample.inventory_qty || 0) * Number(sample.mid || 0)), 0)} in current inventory notional`) +
-        metric('Per-Quote Cap', `$${fmt(cur.configured_max_quote_notional, 0)}`, `base $${fmt(cur.configured_base_order_notional, 0)} | bid ${fmt(liveBidNotional, 0)} / ask ${fmt(liveAskNotional, 0)}`) +
+        metric('Buying Power', usd(size.buying_power, 0), `equity ${usd(cur.configured_account_balance, 0)} at ${fmt(cur.configured_leverage, 0)}x`) +
+        metric('Max Inventory', usd(cur.configured_max_inventory_notional, 0), `${usd(Math.abs(Number(sample.inventory_qty || 0) * Number(sample.mid || 0)), 0)} in current inventory notional`) +
+        metric('Per-Quote Cap', usd(cur.configured_max_quote_notional, 0), `base ${usd(cur.configured_base_order_notional, 0)} | bid ${usd(liveBidNotional, 0)} / ask ${usd(liveAskNotional, 0)}`) +
         metric('Cap Reason', cap.headline, cap.detail, 'warn') +
-        metric('Average Fill Size', `${fmt(size.passive_fill_avg_notional, 0)} notional`, `${fmt(size.passive_fill_avg_buying_power_pct, 2)}% of buying power`) +
-        metric('P95 Fill Size', `${fmt(size.passive_fill_p95_notional, 0)} notional`, `${fmt(size.passive_fill_p95_buying_power_pct, 2)}% of buying power`) +
-        metric('Max Fill Size', `${fmt(size.passive_fill_max_notional, 0)} notional`, `${fmt(size.passive_fill_max_notional && size.buying_power ? (size.passive_fill_max_notional / size.buying_power) * 100 : null, 2)}% of buying power`) +
+        metric('Average Fill Size', `${usd(size.passive_fill_avg_notional, 0)} notional`, `${fmt(size.passive_fill_avg_buying_power_pct, 2)}% of buying power`) +
+        metric('P95 Fill Size', `${usd(size.passive_fill_p95_notional, 0)} notional`, `${fmt(size.passive_fill_p95_buying_power_pct, 2)}% of buying power`) +
+        metric('Max Fill Size', `${usd(size.passive_fill_max_notional, 0)} notional`, `${fmt(size.passive_fill_max_notional && size.buying_power ? (size.passive_fill_max_notional / size.buying_power) * 100 : null, 2)}% of buying power`) +
         metric('Touch Share', `${fmt(size.passive_fill_avg_touch_share_pct, 1)}% avg`, `p95 ${fmt(size.passive_fill_p95_touch_share_pct, 1)}% | >50% touch count ${fmt(size.passive_fill_over_50pct_touch_count, 0)}`) +
         metric('Queue Ahead At Fill', `${fmt(size.passive_fill_queue_ahead_avg, 1)} avg`, `p95 ${fmt(size.passive_fill_queue_ahead_p95, 1)}`) +
-        metric('Notional Throughput', `$${fmt(fillTurnover, 0)}`, `${fmt(size.fill_turnover_units, 2)} HYPE traded this run`) +
-        metric('Closed Turnover', `$${fmt(closedTurnover, 0)}`, `realised spread ${fmt(cur.avg_realized_spread_bps, 3)} bps`) +
-        metric('No-Cost Mode', 'enabled', 'Kevin demo assumes zero maker, taker, and rebate costs on purpose', 'good') +
+        metric('Notional Throughput', usd(fillTurnover, 0), `${fmt(size.fill_turnover_units, 2)} HYPE traded this run`) +
+        metric('Closed Turnover', usd(closedTurnover, 0), `realised spread ${fmt(cur.avg_realized_spread_bps, 3)} bps`) +
+        metric('Fee Mode', feeModeLabel, `${cur.fee_precision_note || 'fee estimate detail unavailable'} | basis ${feeBasis}`) +
         metric('Sizing Read', behaviour, `size risk ${fmt(sample.size_risk_multiplier, 2)}x | quote mode ${sample.quote_mode || 'n/a'}`);
 
       document.getElementById('kills').innerHTML =
         metric('Kill Episodes', fmt(cur.kill_episode_count, 0), `passive closes ${fmt(cur.passive_episode_count, 0)}`) +
-        metric('Kill PnL', fmt(cur.kill_realized_pnl_total, 4), `$${fmt(cur.kill_closed_turnover, 0)} turnover | ${fmt(cur.kill_edge_bps, 3)} bps`, cls(cur.kill_realized_pnl_total, 'pnl')) +
-        metric('Passive PnL', fmt(cur.passive_realized_pnl_total, 4), `$${fmt(cur.passive_closed_turnover, 0)} turnover | ${fmt(cur.passive_edge_bps, 3)} bps`, cls(cur.passive_realized_pnl_total, 'pnl')) +
+        metric('Kill PnL', usd(cur.kill_realized_pnl_total, 4), `margin ${pct(killMarginPct, 3)} on ${usd(killTurnover, 0)} turnover | ${fmt(cur.kill_edge_bps, 3)} bps`, cls(cur.kill_realized_pnl_total, 'pnl')) +
+        metric('Passive PnL', usd(cur.passive_realized_pnl_total, 4), `margin ${pct(passiveMarginPct, 3)} on ${usd(passiveTurnover, 0)} turnover | ${fmt(cur.passive_edge_bps, 3)} bps`, cls(cur.passive_realized_pnl_total, 'pnl')) +
         metric('Kill Share Of Turnover', `${closedTurnover > 0 ? fmt((Number(cur.kill_closed_turnover || 0) / closedTurnover) * 100, 1) : 'n/a'}%`, 'completed-episode turnover ending in kills', Number(cur.kill_edge_bps || 0) < 0 ? 'warn' : 'good') +
         metric('Kill Share Of Loss', `${grossRealized !== 0 ? fmt((Math.abs(Number(cur.kill_realized_pnl_total || 0)) / Math.max(Math.abs(grossRealized), 1e-9)) * 100, 1) : 'n/a'}%`, 'absolute kill drag relative to gross realised pnl', Number(cur.kill_realized_pnl_total || 0) < 0 ? 'warn' : 'good') +
+        metric('Top Loss Bucket', topLossBucket ? topLossBucket.label : 'n/a', topLossBucket ? `${fmt(topLossBucket.count, 0)} episodes | ${usd(topLossBucket.realized_pnl, 4)} on ${usd(topLossBucketTurnover, 0)} (${pct(topLossBucketMarginPct, 3)})` : 'no realized losses yet', topLossBucket && Number(topLossBucket.realized_pnl || 0) < 0 ? 'warn' : 'good') +
+        metric('Loss Side Split', `long ${fmt(cur.long_loss_count, 0)} / short ${fmt(cur.short_loss_count, 0)}`, `${usd(cur.long_loss_pnl_total, 4)} on ${usd(longLossTurnover, 0)} (${pct(longLossMarginPct, 3)}) vs ${usd(cur.short_loss_pnl_total, 4)} on ${usd(shortLossTurnover, 0)} (${pct(shortLossMarginPct, 3)})`, Number(cur.long_loss_pnl_total || 0) < Number(cur.short_loss_pnl_total || 0) ? 'warn' : 'good') +
         metric('Quote vs Kill Mix', `${fmt(cur.passive_fills, 0)} passive`, `${fmt(cur.kill_fills, 0)} aggressive kill fills`, Number(cur.kill_fills || 0) > Number(cur.passive_fills || 0) ? 'warn' : 'good') +
         metric('Protection Samples', `${fmt(cur.inventory_protection_samples, 0)}`, `event regime ${fmt(cur.event_regime_samples, 0)} | stale skips ${fmt(cur.stale_quote_skips, 0)}`) +
         metric('Kill Efficiency', `${fmt(cur.avg_best_markout_bps, 3)} best`, `net spread ${fmt(cur.net_edge_bps, 3)} bps | realised spread ${fmt(cur.avg_realized_spread_bps, 3)} bps`, Number(cur.net_edge_bps || 0) > 0 ? 'good' : 'warn') +
@@ -1214,12 +1383,12 @@ def render_html() -> str:
           <td>${row.episode_id || ''}</td>
           <td>${row.liquidity_role || ''}</td>
           <td>${row.side || ''}</td>
-          <td>${fmt(row.price, 4)}</td>
+          <td>${usd(row.price, 4)}</td>
           <td>${fmt(row.size, 4)}</td>
-          <td>${fmt(row.notional, 2)}</td>
+          <td>${usd(row.notional, 2)}</td>
           <td>${row.reason || ''}</td>
           <td>${fmt(row.inventory_qty_after, 4)}</td>
-          <td>${fmt(row.realized_pnl_delta, 4)}</td>
+          <td>${usd(row.realized_pnl_delta, 4)}</td>
         </tr>
       `).join('');
       document.getElementById('fills').innerHTML = fillsRows || '<tr><td colspan="11">No fills yet.</td></tr>';
@@ -1231,9 +1400,9 @@ def render_html() -> str:
           <td>${row.open_time_utc || ''}</td>
           <td>${row.close_time_utc || ''}</td>
           <td>${fmt(row.max_abs_qty, 4)}</td>
-          <td>${fmt(row.entry_price_avg, 4)}</td>
-          <td>${fmt(row.exit_price_avg, 4)}</td>
-          <td>${fmt(row.realized_pnl, 4)}</td>
+          <td>${usd(row.entry_price_avg, 4)}</td>
+          <td>${usd(row.exit_price_avg, 4)}</td>
+          <td>${usd(row.realized_pnl, 4)}</td>
           <td>${fmt(row.hold_seconds, 3)}</td>
           <td>${fmt(row.best_markout_bps, 3)}</td>
           <td>${fmt(row.worst_markout_bps, 3)}</td>
