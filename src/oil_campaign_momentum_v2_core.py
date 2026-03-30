@@ -146,6 +146,60 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             return "arm"
         return "arm" if snapshot.regime in {"tension", "campaign"} else "flat"
 
+    def _entry_profile(
+        self,
+        *,
+        side: str,
+        score: float,
+        opposing_score: float,
+        fast_impulse_bps: float,
+        confirm_impulse_bps: float,
+        fast_threshold_bps: float,
+        confirm_threshold_bps: float,
+        breakout_distance_bps: float,
+        flow_imbalance: float,
+        book_imbalance: float,
+        trade_count_ok: bool,
+        spread_ok: bool,
+        extreme_blocked: bool,
+        full_ready: bool,
+        reference_price: float | None = None,
+    ) -> Optional[str]:
+        del extreme_blocked
+        direction = 1.0 if side == "LONG" else -1.0
+        score_edge = score - opposing_score
+        flow = direction * flow_imbalance
+        book = direction * book_imbalance
+        directional_fast = direction * fast_impulse_bps
+        directional_confirm = direction * confirm_impulse_bps
+        if (
+            full_ready
+            and trade_count_ok
+            and spread_ok
+            and score >= self.campaign_score_min
+            and score_edge >= self.campaign_score_edge_min
+        ):
+            return "campaign"
+        effective_probe_slack_bps = self.probe_breakout_slack_bps
+        if reference_price is not None and reference_price > 0:
+            effective_probe_slack_bps = self._effective_probe_breakout_slack_bps(reference_price)
+        probe_boundary = -effective_probe_slack_bps
+        if (
+            self._global_probe_allowed()
+            and self._probe_allowed(side)
+            and trade_count_ok
+            and spread_ok
+            and score >= self.probe_score_min
+            and score_edge >= self.probe_score_edge_min
+            and directional_fast >= fast_threshold_bps * self.probe_fast_threshold_ratio
+            and directional_confirm >= confirm_threshold_bps * self.probe_confirm_threshold_ratio
+            and breakout_distance_bps >= probe_boundary
+            and flow >= (self.flow_imbalance_min * self.probe_flow_multiplier)
+            and book >= (self.book_imbalance_min * self.probe_book_multiplier)
+        ):
+            return "probe"
+        return None
+
     def _write_feature_row(self, payload: Dict[str, object]) -> None:
         if self.features_jsonl_path is None:
             return
@@ -339,6 +393,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             spread_ok=spread_ok and not loss_risk_blocked and long_probe_confirmed,
             extreme_blocked=False,
             full_ready=long_ready,
+            reference_price=quote.mid,
         )
         short_entry_profile = self._entry_profile(
             side="SHORT",
@@ -355,6 +410,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             spread_ok=spread_ok and not loss_risk_blocked and short_probe_confirmed,
             extreme_blocked=False,
             full_ready=short_ready,
+            reference_price=quote.mid,
         )
 
         if not spread_ok or loss_risk_blocked:

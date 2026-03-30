@@ -113,6 +113,46 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             self.assertTrue(any(row.get("row_type") == "candidate" for row in rows))
             self.assertTrue(any(row.get("row_type") == "label" for row in rows))
 
+    def test_probe_entry_uses_tick_aware_breakout_slack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            raw_profile = bot._entry_profile(
+                side="LONG",
+                score=72.0,
+                opposing_score=40.0,
+                fast_impulse_bps=6.2,
+                confirm_impulse_bps=11.8,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=-0.50,
+                flow_imbalance=0.45,
+                book_imbalance=0.30,
+                trade_count_ok=True,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+            )
+            tick_aware_profile = bot._entry_profile(
+                side="LONG",
+                score=72.0,
+                opposing_score=40.0,
+                fast_impulse_bps=6.2,
+                confirm_impulse_bps=11.8,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=-0.50,
+                flow_imbalance=0.45,
+                book_imbalance=0.30,
+                trade_count_ok=True,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+                reference_price=100.0,
+            )
+
+            self.assertIsNone(raw_profile)
+            self.assertEqual(tick_aware_profile, "probe")
+
     def _make_bot(self, root: Path, **overrides: object) -> OilCampaignMomentumV2Bot:
         params = {
             "asset": "xyz:BRENTOIL",
