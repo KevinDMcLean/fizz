@@ -24,7 +24,7 @@ from atlas_mm_feeaware_core import (
 from hyperliquid_fee_model import FeeState
 from pa_pump_pro_core import BookSnapshot, HyperliquidRealtimeMultiFeed, MarketSnapshot
 
-APP_NAME = "Kevin Hype Liquidity Engine"
+APP_NAME = "Kevin Liquidity Engine"
 
 
 @dataclass
@@ -1052,7 +1052,8 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
 
     def run(self) -> None:
         logging.info(
-            "Starting Kevin Hype Liquidity Engine asset=%s sample_ms=%d vol_window_s=%.1f impulse_window_s=%.1f flow_window_s=%.1f base_notional=%.2f max_inventory_notional=%.2f max_spread_bps=%.2f",
+            "Starting %s asset=%s sample_ms=%d vol_window_s=%.1f impulse_window_s=%.1f flow_window_s=%.1f base_notional=%.2f max_inventory_notional=%.2f max_spread_bps=%.2f",
+            APP_NAME,
             self.asset,
             self.config.sample_ms,
             self.config.volatility_lookback_seconds,
@@ -1071,7 +1072,7 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
             )
             first_snapshot = self._wait_for_first_snapshot(timeout_seconds=10.0)
         except Exception:
-            logging.exception("Kevin Hype startup preflight failed")
+            logging.exception("%s startup preflight failed", APP_NAME)
             self._write_event("startup_preflight_failed", strategy_name=APP_NAME)
             return
 
@@ -1199,5 +1200,5 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
             except Exception as exc:
                 self.poll_error_count += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
-                logging.exception("Kevin Hype realtime loop error")
+                logging.exception("%s realtime loop error", APP_NAME)
                 self._write_event("polling_error", strategy_name=APP_NAME, error=self.last_error)

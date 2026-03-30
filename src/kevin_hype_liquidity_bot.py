@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kevin Hype Liquidity Engine: passive-first HYPE market maker."""
+"""Kevin Liquidity Engine: Kevin-only passive market maker profiles."""
 
 from __future__ import annotations
 

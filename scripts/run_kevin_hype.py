@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Kevin Hype Liquidity Engine from this suite."""
+"""Run Kevin Liquidity Engine profiles from this suite."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from _launcher_common import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Kevin Hype Liquidity Engine from this suite")
-    parser.add_argument("--market", default="hype", help="Kevin HYPE market profile name")
+    parser = argparse.ArgumentParser(description="Run Kevin Liquidity Engine from this suite")
+    parser.add_argument("--market", default="hype", help="Kevin market profile name")
     parser.add_argument("--account", default="paper_default", help="Account config name")
     parser.add_argument("--python", default=default_python_executable(), help="Python interpreter to use")
     parser.add_argument("--run-name", default=None, help="Optional run directory name")
@@ -40,6 +40,7 @@ def main() -> int:
     profile_file = ROOT / "config" / "kevin_hype" / f"{args.market}.json"
     account_config = load_json(account_file)
     profile_config = load_json(profile_file)
+    strategy_name = profile_config.get("strategy_name") or "Kevin Liquidity Engine"
 
     run_name = args.run_name or timestamped_run_name(args.market)
     paths = make_run_paths(
@@ -50,6 +51,7 @@ def main() -> int:
     )
 
     bot_config = base_bot_config(account_config, profile_config)
+    bot_config.pop("strategy_name", None)
     for key in (
         "account_address",
         "maker_fee_pct_override",
@@ -84,7 +86,7 @@ def main() -> int:
     }
     write_manifest(
         manifest_path=paths["run_dir"] / "run_manifest.json",
-        strategy_name="Kevin Hype Liquidity Engine",
+        strategy_name=strategy_name,
         market_name=profile_config["market_name"],
         account_name=args.account,
         account_file=account_file,
@@ -102,7 +104,7 @@ def main() -> int:
         dashboard_config=dashboard_config,
         with_dashboard=args.dashboard,
         dry_run=args.dry_run,
-        title=f"Starting Kevin Hype Liquidity Engine for {profile_config['market_name']}",
+        title=f"Starting {strategy_name} for {profile_config['market_name']}",
     )
 
 

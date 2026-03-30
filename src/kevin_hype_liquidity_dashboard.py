@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dashboard for Kevin Hype Liquidity Engine."""
+"""Dashboard for Kevin Liquidity Engine."""
 
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ from urllib.parse import urlparse
 
 from hyperliquid_fee_model import HyperliquidFeeConfig, fee_rates_for_tier
 
-APP_NAME = "Kevin Hype Liquidity Engine"
+APP_NAME = "Kevin Liquidity Engine"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KEVIN_PROFILE_DIR = REPO_ROOT / "config" / "kevin_hype"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Local dashboard for Kevin Hype Liquidity Engine")
+    parser = argparse.ArgumentParser(description="Local dashboard for Kevin Liquidity Engine")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8795)
     parser.add_argument("--events-jsonl", default="logs/kevin_hype_events.jsonl")
@@ -416,6 +416,13 @@ def _venue_name_from_api(api_url: str | None) -> str:
     if not raw:
         return "n/a"
     return api_url or "n/a"
+
+
+def _asset_display_symbol(asset: str | None) -> str:
+    raw = (asset or "").strip()
+    if not raw:
+        return "units"
+    return raw.split(":")[-1] or raw
 
 
 def _available_kevin_profiles() -> List[Dict[str, Any]]:
@@ -1034,6 +1041,8 @@ class DashboardSummaryCache:
             bot_config = manifest.get("bot_config") if isinstance(manifest.get("bot_config"), dict) else {}
             market_name = str(manifest.get("market_name") or latest_sample.get("asset") or (self.last_started.get("asset") if self.last_started else "n/a"))
             asset = str((bot_config or {}).get("asset") or latest_sample.get("asset") or (self.last_started.get("asset") if self.last_started else market_name))
+            asset_symbol = _asset_display_symbol(asset)
+            strategy_name = str(manifest.get("strategy_name") or APP_NAME)
             account_name = str(manifest.get("account_name") or "n/a")
             api_url = str((bot_config or {}).get("api_url") or (self.last_started.get("api_url") if self.last_started else ""))
             venue_name = _venue_name_from_api(api_url)
@@ -1222,6 +1231,8 @@ class DashboardSummaryCache:
                 "configured_leverage": leverage,
                 "market_name": market_name,
                 "asset": asset,
+                "asset_symbol": asset_symbol,
+                "strategy_name": strategy_name,
                 "account_name": account_name,
                 "venue_name": venue_name,
                 "api_url": api_url,
@@ -1292,7 +1303,7 @@ class DashboardSummaryCache:
                     "quote_reason": latest_sample.get("quoting_reason"),
                     "bid_reason": latest_sample.get("bid_reason"),
                     "ask_reason": latest_sample.get("ask_reason"),
-                    "data_source": f"websocket bbo + l2Book + trades | Kevin fee-aware fills ({fee_mode_label})",
+                    "data_source": f"websocket bbo + l2Book + trades | {strategy_name} fee-aware fills ({fee_mode_label})",
                 },
                 "recent_fills": list(self.recent_fills),
                 "recent_trades": list(self.recent_trades),
@@ -1700,7 +1711,7 @@ def render_html() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kevin Hype Liquidity Engine</title>
+  <title>Kevin Liquidity Engine</title>
   <style>
     :root {
       --bg-a: #05080f;
@@ -1864,7 +1875,7 @@ def render_html() -> str:
   <main>
     <div class="topbar">
       <div class="stack">
-        <h1>Kevin Hype Liquidity Engine</h1>
+        <h1 id="app-title">Kevin Liquidity Engine</h1>
         <p class="meta" id="stamp">Loading...</p>
       </div>
       <div class="stack" style="justify-items:end;">
@@ -2074,8 +2085,9 @@ def render_html() -> str:
       if (maxQuoteAge > 0 && quoteAge > maxQuoteAge) {
         return 'Feed is stale relative to the configured cap, so the strategy is behaving defensively.';
       }
+      const marketLabel = cur.market_name || cur.asset_symbol || cur.asset || 'market';
       if ((sample.quote_mode || '') === 'both' && Number(sample.size_risk_multiplier || 1) >= 0.85) {
-        return 'Healthy two-way quoting with size still open enough to show the HYPE book properly.';
+        return `Healthy two-way quoting with size still open enough to show the ${marketLabel} book properly.`;
       }
       if ((sample.quote_mode || '') === 'bid_only' || (sample.quote_mode || '') === 'ask_only') {
         return 'Leaning into one-way quoting because the tape is directional, while still avoiding an aggressive chase.';
@@ -2182,7 +2194,11 @@ def render_html() -> str:
       const behaviour = behaviourVerdict(sample, cur, cap);
       const availableProfiles = (cur.available_profiles || []).map((item) => item.slug || item.market_name || '').filter(Boolean);
       const switchHint = cur.switch_command || '.\\.venv\\Scripts\\python.exe .\\scripts\\run_kevin_hype.py --market <profile>';
+      const strategyName = cur.strategy_name || 'Kevin Liquidity Engine';
+      const assetSymbol = cur.asset_symbol || cur.asset || 'units';
 
+      document.title = `${cur.market_name || strategyName} | ${strategyName}`;
+      document.getElementById('app-title').textContent = strategyName;
       document.getElementById('stamp').textContent = `Updated ${data.generated_at_utc}`;
       document.getElementById('market-chip').textContent = `Market ${cur.market_name || cur.asset || 'n/a'} | Venue ${cur.venue_name || 'n/a'} | Account ${cur.account_name || 'n/a'}`;
       document.getElementById('datasource').textContent = `Source: ${decision.data_source || 'n/a'}`;
@@ -2273,7 +2289,7 @@ def render_html() -> str:
         metric('Max Fill Size', `${usd(size.passive_fill_max_notional, 0)} notional`, `${fmt(size.passive_fill_max_notional && size.buying_power ? (size.passive_fill_max_notional / size.buying_power) * 100 : null, 2)}% of buying power`) +
         metric('Touch Share', `${fmt(size.passive_fill_avg_touch_share_pct, 1)}% avg`, `p95 ${fmt(size.passive_fill_p95_touch_share_pct, 1)}% | >50% touch count ${fmt(size.passive_fill_over_50pct_touch_count, 0)}`) +
         metric('Queue Ahead At Fill', `${fmt(size.passive_fill_queue_ahead_avg, 1)} avg`, `p95 ${fmt(size.passive_fill_queue_ahead_p95, 1)}`) +
-        metric('Notional Throughput', usd(fillTurnover, 0), `${fmt(size.fill_turnover_units, 2)} HYPE traded this run`) +
+        metric('Notional Throughput', usd(fillTurnover, 0), `${fmt(size.fill_turnover_units, 2)} ${assetSymbol} traded this run`) +
         metric('Closed Turnover', usd(closedTurnover, 0), `realised spread ${fmt(cur.avg_realized_spread_bps, 3)} bps`) +
         metric('Fee Mode', feeModeLabel, `${cur.fee_precision_note || 'fee estimate detail unavailable'} | basis ${feeBasis}`) +
         metric('Sizing Read', behaviour, `size risk ${fmt(sample.size_risk_multiplier, 2)}x | quote mode ${sample.quote_mode || 'n/a'}`);
