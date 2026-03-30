@@ -78,6 +78,8 @@
   "probe_confirm_threshold_ratio": 0.80,
   "probe_breakout_slack_bps": 0.12,
   "probe_breakout_slack_ticks": 1.0,
+  "probe_min_breakout_fraction": 0.55,
+  "probe_max_spread_bps": 2.60,
   "probe_flow_multiplier": 1.0,
   "probe_book_multiplier": 1.0,
   "campaign_score_min": 80.0,

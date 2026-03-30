@@ -117,7 +117,7 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             self.assertTrue(any(row.get("row_type") == "candidate" for row in rows))
             self.assertTrue(any(row.get("row_type") == "label" for row in rows))
 
-    def test_probe_entry_uses_tick_aware_breakout_slack(self) -> None:
+    def test_probe_requires_meaningful_tick_aware_breakout_penetration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
             raw_profile = bot._entry_profile(
@@ -132,6 +132,7 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 flow_imbalance=0.45,
                 book_imbalance=0.30,
                 trade_count_ok=True,
+                spread_bps=1.0,
                 spread_ok=True,
                 extreme_blocked=False,
                 full_ready=False,
@@ -140,16 +141,17 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             )
             tick_aware_profile = bot._entry_profile(
                 side="LONG",
-                score=72.0,
+                score=84.0,
                 opposing_score=40.0,
-                fast_impulse_bps=6.2,
-                confirm_impulse_bps=11.8,
+                fast_impulse_bps=6.7,
+                confirm_impulse_bps=11.9,
                 fast_threshold_bps=5.5,
                 confirm_threshold_bps=11.0,
-                breakout_distance_bps=-0.50,
+                breakout_distance_bps=1.15,
                 flow_imbalance=0.45,
                 book_imbalance=0.30,
                 trade_count_ok=True,
+                spread_bps=1.0,
                 spread_ok=True,
                 extreme_blocked=False,
                 full_ready=False,
@@ -176,6 +178,7 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 flow_imbalance=0.55,
                 book_imbalance=0.30,
                 trade_count_ok=True,
+                spread_bps=1.0,
                 spread_ok=True,
                 extreme_blocked=False,
                 full_ready=False,
@@ -203,6 +206,7 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 flow_imbalance=0.70,
                 book_imbalance=0.35,
                 trade_count_ok=True,
+                spread_bps=1.0,
                 spread_ok=True,
                 extreme_blocked=False,
                 full_ready=False,
@@ -222,6 +226,7 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 flow_imbalance=0.70,
                 book_imbalance=0.35,
                 trade_count_ok=True,
+                spread_bps=1.0,
                 spread_ok=True,
                 extreme_blocked=False,
                 full_ready=False,
@@ -241,6 +246,7 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 flow_imbalance=0.80,
                 book_imbalance=0.40,
                 trade_count_ok=True,
+                spread_bps=1.0,
                 spread_ok=True,
                 extreme_blocked=False,
                 full_ready=False,
@@ -251,7 +257,59 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
 
             self.assertIsNone(soft_profile)
             self.assertIsNone(hard_profile)
-            self.assertEqual(clean_profile, "probe")
+            self.assertIsNone(clean_profile)
+
+    def test_probe_blocks_wide_spread_even_with_clean_breakout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            profile = bot._entry_profile(
+                side="LONG",
+                score=96.0,
+                opposing_score=40.0,
+                fast_impulse_bps=6.5,
+                confirm_impulse_bps=11.8,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=1.25,
+                flow_imbalance=0.80,
+                book_imbalance=0.40,
+                trade_count_ok=True,
+                spread_bps=2.8,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+                reference_price=100.0,
+                probe_depth_confirmed=True,
+                probe_initiative_confirmed=True,
+            )
+
+            self.assertIsNone(profile)
+
+    def test_probe_allows_clean_partial_break_with_tight_spread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            profile = bot._entry_profile(
+                side="LONG",
+                score=96.0,
+                opposing_score=40.0,
+                fast_impulse_bps=6.6,
+                confirm_impulse_bps=11.8,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=1.20,
+                flow_imbalance=0.80,
+                book_imbalance=0.40,
+                trade_count_ok=True,
+                spread_bps=1.2,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+                reference_price=100.0,
+                probe_depth_confirmed=True,
+                probe_initiative_confirmed=True,
+            )
+
+            self.assertEqual(profile, "probe")
 
     def test_soft_probe_seed_requires_extra_confirmation_sample(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -411,6 +469,8 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             "probe_confirm_threshold_ratio": 0.80,
             "probe_breakout_slack_bps": 0.12,
             "probe_breakout_slack_ticks": 1.0,
+            "probe_min_breakout_fraction": 0.55,
+            "probe_max_spread_bps": 2.5,
             "probe_flow_multiplier": 1.0,
             "probe_book_multiplier": 1.0,
             "campaign_score_min": 80.0,

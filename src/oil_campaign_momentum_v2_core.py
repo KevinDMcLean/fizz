@@ -34,6 +34,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         tick_size: float,
         breakout_buffer_ticks: float,
         probe_breakout_slack_ticks: float,
+        probe_min_breakout_fraction: float,
+        probe_max_spread_bps: float,
         breakout_reclaim_ticks: float,
         add_on_extension_ticks: float,
         failed_breakout_ticks: float,
@@ -50,6 +52,10 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             raise ValueError("Tick size must be > 0.")
         if breakout_buffer_ticks < 0 or probe_breakout_slack_ticks < 0:
             raise ValueError("Tick floor controls must be >= 0.")
+        if probe_min_breakout_fraction <= 0:
+            raise ValueError("Probe minimum breakout fraction must be > 0.")
+        if probe_max_spread_bps <= 0:
+            raise ValueError("Probe max spread bps must be > 0.")
         if breakout_reclaim_ticks < 0 or add_on_extension_ticks < 0 or failed_breakout_ticks < 0:
             raise ValueError("Breakout reclaim/add-on/failure tick floors must be >= 0.")
         if not 0.0 < depth_vacuum_near_ratio_max <= 1.0:
@@ -64,6 +70,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         self.tick_size = tick_size
         self.breakout_buffer_ticks = breakout_buffer_ticks
         self.probe_breakout_slack_ticks = probe_breakout_slack_ticks
+        self.probe_min_breakout_fraction = probe_min_breakout_fraction
+        self.probe_max_spread_bps = probe_max_spread_bps
         self.breakout_reclaim_ticks = breakout_reclaim_ticks
         self.add_on_extension_ticks = add_on_extension_ticks
         self.failed_breakout_ticks = failed_breakout_ticks
@@ -160,6 +168,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         flow_imbalance: float,
         book_imbalance: float,
         trade_count_ok: bool,
+        spread_bps: float,
         spread_ok: bool,
         extreme_blocked: bool,
         full_ready: bool,
@@ -186,26 +195,32 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         ):
             return "campaign"
         effective_probe_slack_bps = self.probe_breakout_slack_bps
+        effective_breakout_buffer_bps = self.breakout_buffer_bps
         if reference_price is not None and reference_price > 0:
             effective_probe_slack_bps = self._effective_probe_breakout_slack_bps(reference_price)
+            effective_breakout_buffer_bps = self._effective_breakout_buffer_bps(reference_price)
+        minimum_probe_breakout_bps = effective_breakout_buffer_bps * self.probe_min_breakout_fraction
+        if breakout_distance_bps < minimum_probe_breakout_bps:
+            return None
         probe_boundary = -effective_probe_slack_bps
-        soft_probe = breakout_distance_bps < 0.0
+        partial_breakout = breakout_distance_bps < effective_breakout_buffer_bps
         required_probe_fast = fast_threshold_bps * self.probe_fast_threshold_ratio
         required_probe_confirm = confirm_threshold_bps * self.probe_confirm_threshold_ratio
         required_score_edge = self.probe_score_edge_min
         required_flow = self.flow_imbalance_min * self.probe_flow_multiplier
         required_book = self.book_imbalance_min * self.probe_book_multiplier
-        if soft_probe:
-            # When we are only inside slack rather than through the level, require both
-            # confirmation modes plus a stronger impulse floor to cut false starts.
+        if partial_breakout:
+            # Partial breaks still get probe treatment, but they must show both
+            # confirmation modes and a stronger score/impulse profile than a full break.
             if not (probe_depth_confirmed and probe_initiative_confirmed):
                 return None
             required_probe_fast = max(required_probe_fast, fast_threshold_bps * 0.72)
             required_probe_confirm = max(required_probe_confirm, confirm_threshold_bps * 0.80)
+            required_score_edge += 2.0
         if recent_side_probe_failures > 0:
             # After a same-side probe loss, stop paying for another "almost there"
             # entry and force the next probe to be a cleaner breakout.
-            if soft_probe:
+            if partial_breakout:
                 return None
             if side == "LONG":
                 required_probe_fast = max(required_probe_fast, fast_threshold_bps)
@@ -218,6 +233,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             and self._probe_allowed(side)
             and trade_count_ok
             and spread_ok
+            and spread_bps <= self.probe_max_spread_bps
             and score >= self.probe_score_min
             and score_edge >= required_score_edge
             and directional_fast >= required_probe_fast
@@ -419,6 +435,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             flow_imbalance=flow["imbalance"],
             book_imbalance=book_imbalance,
             trade_count_ok=trade_count_ok,
+            spread_bps=quote.spread_bps,
             spread_ok=spread_ok and not loss_risk_blocked and long_probe_confirmed,
             extreme_blocked=False,
             full_ready=long_ready,
@@ -438,6 +455,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             flow_imbalance=flow["imbalance"],
             book_imbalance=book_imbalance,
             trade_count_ok=trade_count_ok,
+            spread_bps=quote.spread_bps,
             spread_ok=spread_ok and not loss_risk_blocked and short_probe_confirmed,
             extreme_blocked=False,
             full_ready=short_ready,
