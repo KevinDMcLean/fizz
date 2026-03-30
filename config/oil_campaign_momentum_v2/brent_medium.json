@@ -119,6 +119,7 @@
   "reclaim_veto_window_seconds": 8.0,
   "reclaim_cooldown_seconds": 75.0,
   "probe_promotion_mfe_r": 0.08,
+  "probe_promotion_min_hold_seconds": 1.25,
   "probe_trade_participation_cap": 1.5,
   "campaign_trade_participation_cap": 5.0,
   "add_on_trade_participation_cap": 3.0,

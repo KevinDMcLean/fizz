@@ -25,6 +25,7 @@ DEFAULT_INITIATIVE_PERSISTENCE_WINDOWS = 3
 DEFAULT_RECLAIM_VETO_WINDOW_SECONDS = 8.0
 DEFAULT_RECLAIM_COOLDOWN_SECONDS = 90.0
 DEFAULT_PROBE_PROMOTION_MFE_R = 0.12
+DEFAULT_PROBE_PROMOTION_MIN_HOLD_SECONDS = 1.0
 DEFAULT_PROBE_TRADE_PARTICIPATION_CAP = 2.0
 DEFAULT_CAMPAIGN_TRADE_PARTICIPATION_CAP = 6.0
 DEFAULT_ADD_ON_TRADE_PARTICIPATION_CAP = 4.0
@@ -50,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     extra.add_argument("--reclaim-veto-window-seconds", type=float, default=DEFAULT_RECLAIM_VETO_WINDOW_SECONDS)
     extra.add_argument("--reclaim-cooldown-seconds", type=float, default=DEFAULT_RECLAIM_COOLDOWN_SECONDS)
     extra.add_argument("--probe-promotion-mfe-r", type=float, default=DEFAULT_PROBE_PROMOTION_MFE_R)
+    extra.add_argument("--probe-promotion-min-hold-seconds", type=float, default=DEFAULT_PROBE_PROMOTION_MIN_HOLD_SECONDS)
     extra.add_argument("--probe-trade-participation-cap", type=float, default=DEFAULT_PROBE_TRADE_PARTICIPATION_CAP)
     extra.add_argument("--campaign-trade-participation-cap", type=float, default=DEFAULT_CAMPAIGN_TRADE_PARTICIPATION_CAP)
     extra.add_argument("--add-on-trade-participation-cap", type=float, default=DEFAULT_ADD_ON_TRADE_PARTICIPATION_CAP)

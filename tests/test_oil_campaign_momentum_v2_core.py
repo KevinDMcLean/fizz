@@ -104,7 +104,8 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
 
             self.assertIsNotNone(bot.position)
             assert bot.position is not None
-            self.assertEqual(bot.position.entry_profile, "campaign")
+            self.assertEqual(bot.position.entry_profile, "probe")
+            self.assertLess(bot.position.notional, bot.max_notional * bot.campaign_entry_notional_fraction)
 
     def test_campaign_first_sample_entry_stays_blocked_during_warmup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -500,6 +501,54 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             self.assertIsNone(updated)
             self.assertIsNone(bot.pending_candidate)
 
+    def test_campaign_seed_probe_promotes_only_after_hold_and_breakout_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1, probe_promotion_min_hold_seconds=1.5)
+            now_ms = int(time.time() * 1000)
+            self._seed_campaign_prices(bot, now_ms)
+            bot.started_at_ts = time.time() - 20.0
+
+            signal = bot._build_signal_snapshot(self._campaign_long_snapshot(now_ms))
+            self.assertIsNotNone(signal)
+            assert signal is not None
+
+            bot._maybe_enter(signal)
+
+            self.assertIsNotNone(bot.position)
+            assert bot.position is not None
+            self.assertEqual(bot.position.entry_profile, "probe")
+
+            blocked_on_hold = bot._maybe_promote_probe_to_campaign(
+                signal,
+                current_realized_bps=bot.position.stop_distance_bps * 0.25,
+                mfe_bps=bot.position.stop_distance_bps * 0.25,
+                hold_seconds=0.9,
+            )
+            self.assertFalse(blocked_on_hold)
+            self.assertEqual(bot.position.entry_profile, "probe")
+
+            weak_hold_signal = replace(
+                signal,
+                breakout_distance_long_bps=0.20,
+            )
+            blocked_on_breakout_hold = bot._maybe_promote_probe_to_campaign(
+                weak_hold_signal,
+                current_realized_bps=bot.position.stop_distance_bps * 0.25,
+                mfe_bps=bot.position.stop_distance_bps * 0.25,
+                hold_seconds=2.0,
+            )
+            self.assertFalse(blocked_on_breakout_hold)
+            self.assertEqual(bot.position.entry_profile, "probe")
+
+            promoted = bot._maybe_promote_probe_to_campaign(
+                signal,
+                current_realized_bps=bot.position.stop_distance_bps * 0.25,
+                mfe_bps=bot.position.stop_distance_bps * 0.25,
+                hold_seconds=2.0,
+            )
+            self.assertTrue(promoted)
+            self.assertEqual(bot.position.entry_profile, "campaign")
+
     def _make_bot(self, root: Path, **overrides: object) -> OilCampaignMomentumV2Bot:
         params = {
             "asset": "xyz:BRENTOIL",
@@ -634,6 +683,7 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             "reclaim_veto_window_seconds": 8.0,
             "reclaim_cooldown_seconds": 90.0,
             "probe_promotion_mfe_r": 0.12,
+            "probe_promotion_min_hold_seconds": 1.0,
             "probe_trade_participation_cap": 2.0,
             "campaign_trade_participation_cap": 6.0,
             "add_on_trade_participation_cap": 4.0,

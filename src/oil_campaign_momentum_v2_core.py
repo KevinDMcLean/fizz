@@ -44,6 +44,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         reclaim_veto_window_seconds: float,
         reclaim_cooldown_seconds: float,
         probe_promotion_mfe_r: float,
+        probe_promotion_min_hold_seconds: float,
         probe_trade_participation_cap: float,
         campaign_trade_participation_cap: float,
         add_on_trade_participation_cap: float,
@@ -73,6 +74,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             raise ValueError("Reclaim veto window must be > 0 and cooldown must be >= 0.")
         if probe_promotion_mfe_r <= 0:
             raise ValueError("Probe promotion MFE R must be > 0.")
+        if probe_promotion_min_hold_seconds <= 0:
+            raise ValueError("Probe promotion minimum hold seconds must be > 0.")
         if probe_trade_participation_cap <= 0 or campaign_trade_participation_cap <= 0 or add_on_trade_participation_cap <= 0:
             raise ValueError("Trade participation caps must be > 0.")
         if campaign_wide_trail_until_r <= 0 or campaign_tighten_after_r <= 0:
@@ -95,6 +98,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         self.reclaim_veto_window_seconds = reclaim_veto_window_seconds
         self.reclaim_cooldown_seconds = reclaim_cooldown_seconds
         self.probe_promotion_mfe_r = probe_promotion_mfe_r
+        self.probe_promotion_min_hold_seconds = probe_promotion_min_hold_seconds
         self.probe_trade_participation_cap = probe_trade_participation_cap
         self.campaign_trade_participation_cap = campaign_trade_participation_cap
         self.add_on_trade_participation_cap = add_on_trade_participation_cap
@@ -288,8 +292,26 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             return
 
         entry_score = signal.long_score if candidate.side == "LONG" else signal.short_score
+        entry_profile = candidate.profile
+        if candidate.profile == "campaign":
+            # Oil entries should earn campaign sizing; the first fill seeds as a
+            # cheap probe and only promotes once the break actually holds.
+            entry_profile = "probe"
+            self._write_event(
+                "campaign_seeded_as_probe",
+                side=candidate.side,
+                candidate_profile=candidate.profile,
+                entry_profile=entry_profile,
+                candidate_count=candidate.count,
+                required_samples=candidate.required_samples,
+                **signal.to_dict(),
+            )
+
+        reason_profile = entry_profile
+        if candidate.profile != entry_profile:
+            reason_profile = f"{entry_profile} seed_from_{candidate.profile}"
         reason = (
-            f"{candidate.side} {candidate.profile} "
+            f"{candidate.side} {reason_profile} "
             f"fast_bps={signal.fast_impulse_bps:.2f} "
             f"confirm_bps={signal.confirm_impulse_bps:.2f} "
             f"flow={signal.flow_imbalance:.3f} "
@@ -313,12 +335,13 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         self._write_event(
             "signal_confirmed",
             side=candidate.side,
-            entry_profile=candidate.profile,
+            candidate_profile=candidate.profile,
+            entry_profile=entry_profile,
             required_samples=candidate.required_samples,
             candidate_count=candidate.count,
             **signal.to_dict(),
         )
-        self._open_position(signal, candidate.side, reason, candidate.profile)
+        self._open_position(signal, candidate.side, reason, entry_profile)
         if self.position is not None:
             self._write_feature_row(
                 {
@@ -818,8 +841,11 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         *,
         current_realized_bps: float,
         mfe_bps: float,
+        hold_seconds: float,
     ) -> bool:
         if self.position is None or self.position.entry_profile != "probe":
+            return False
+        if hold_seconds < self.probe_promotion_min_hold_seconds:
             return False
         side = self.position.side
         score = signal.long_score if side == "LONG" else signal.short_score
@@ -835,6 +861,12 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         if (score - opposing_score) < self.campaign_score_edge_min:
             return False
         if directional_confirm < signal.dynamic_confirm_threshold_bps:
+            return False
+        promotion_breakout_floor_bps = max(
+            self._effective_breakout_buffer_bps(signal.mid) * max(self.probe_min_breakout_fraction, 0.50),
+            self._tick_bps(signal.mid),
+        )
+        if directional_breakout < promotion_breakout_floor_bps:
             return False
         reclaim_floor_bps = max(self._effective_probe_breakout_slack_bps(signal.mid) * 0.5, self._tick_bps(signal.mid))
         if directional_breakout < -reclaim_floor_bps:
@@ -866,7 +898,9 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             opposing_score=opposing_score,
             current_realized_bps=current_realized_bps,
             mfe_bps=mfe_bps,
+            hold_seconds=hold_seconds,
             directional_breakout_bps=directional_breakout,
+            promotion_breakout_floor_bps=promotion_breakout_floor_bps,
             directional_confirm_bps=directional_confirm,
             directional_flow=directional_flow,
             directional_book=directional_book,
@@ -1114,6 +1148,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             signal,
             current_realized_bps=current_realized_bps,
             mfe_bps=mfe_bps,
+            hold_seconds=hold_seconds,
         )
 
         if (
