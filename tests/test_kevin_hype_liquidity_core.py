@@ -10,8 +10,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from atlas_mm_feeaware_core import MMStrategyConfig, MarketFeatures
-from kevin_hype_liquidity_core import build_kevin_quote_plan, zero_fee_state
+from atlas_mm_feeaware_core import MarketFeatures
+from kevin_hype_liquidity_core import KevinHypeConfig, build_kevin_quote_plan, enforce_kevin_entry_guards, zero_fee_state
 from pa_pump_pro_core import BookSnapshot
 
 
@@ -108,6 +108,191 @@ class KevinHypeLiquidityCoreTests(unittest.TestCase):
         self.assertFalse(plan.quoting_enabled)
         self.assertEqual(plan.quoting_reason, "one_way_guard")
 
+    def test_inventory_protection_steps_inside_spread_for_long_inventory(self) -> None:
+        features = self._features()
+        features.bid = 39.550
+        features.ask = 39.554
+        features.mid = 39.552
+        features.microprice = 39.5522
+        features.spread_bps = ((features.ask - features.bid) / features.mid) * 10_000.0
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=80.0,
+            inventory_avg_price=39.590,
+            book=BookSnapshot(
+                bids=[(39.550, 95.0), (39.549, 165.0), (39.548, 230.0)],
+                asks=[(39.554, 48.0), (39.555, 72.0), (39.556, 118.0)],
+                exchange_time_ms=1_000,
+                received_time_ms=1_030,
+            ),
+            config=self._config(),
+            protection_reason="markout_protection",
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quote_mode, "ask_only")
+        self.assertLess(plan.ask_price, features.ask)
+        self.assertGreater(plan.ask_price, features.bid)
+
+    def test_inventory_protection_steps_inside_spread_for_short_inventory(self) -> None:
+        features = self._features()
+        features.bid = 39.550
+        features.ask = 39.554
+        features.mid = 39.552
+        features.microprice = 39.5518
+        features.spread_bps = ((features.ask - features.bid) / features.mid) * 10_000.0
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=-80.0,
+            inventory_avg_price=39.510,
+            book=BookSnapshot(
+                bids=[(39.550, 95.0), (39.549, 165.0), (39.548, 230.0)],
+                asks=[(39.554, 48.0), (39.555, 72.0), (39.556, 118.0)],
+                exchange_time_ms=1_000,
+                received_time_ms=1_030,
+            ),
+            config=self._config(),
+            protection_reason="markout_protection",
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quote_mode, "bid_only")
+        self.assertGreater(plan.bid_price, features.bid)
+        self.assertLess(plan.bid_price, features.ask)
+
+    def test_same_side_pressure_switches_inventory_to_exit_only(self) -> None:
+        features = self._features()
+        features.flow_imbalance = 0.72
+        features.book_imbalance = 0.26
+        features.toxicity_score = 0.82
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=42.0,
+            inventory_avg_price=39.545,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quoting_reason, "inventory_protection")
+        self.assertEqual(plan.quote_mode, "ask_only")
+        self.assertFalse(plan.bid_enabled)
+        self.assertTrue(plan.ask_enabled)
+        self.assertIn("trend_unwind_protection", plan.decision_note)
+
+    def test_adverse_flow_flip_switches_long_inventory_to_exit_only(self) -> None:
+        features = self._features()
+        features.flow_imbalance = -0.88
+        features.book_imbalance = 0.66
+        features.impulse_bps = -2.4
+        features.toxicity_score = 0.90
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=48.0,
+            inventory_avg_price=39.552,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quoting_reason, "inventory_protection")
+        self.assertEqual(plan.quote_mode, "ask_only")
+        self.assertFalse(plan.bid_enabled)
+        self.assertTrue(plan.ask_enabled)
+        self.assertIn("adverse_flow_flip_protection", plan.decision_note)
+
+    def test_adverse_flow_flip_switches_short_inventory_to_exit_only(self) -> None:
+        features = self._features()
+        features.flow_imbalance = 0.91
+        features.book_imbalance = -0.52
+        features.impulse_bps = 2.7
+        features.toxicity_score = 0.93
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=-52.0,
+            inventory_avg_price=39.548,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quoting_reason, "inventory_protection")
+        self.assertEqual(plan.quote_mode, "bid_only")
+        self.assertTrue(plan.bid_enabled)
+        self.assertFalse(plan.ask_enabled)
+        self.assertIn("adverse_flow_flip_protection", plan.decision_note)
+
+    def test_flat_one_way_quote_size_is_capped(self) -> None:
+        features = self._features()
+        features.flow_imbalance = 0.92
+        features.book_imbalance = 0.38
+        features.toxicity_score = 0.96
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        base_qty = self._config().base_order_notional / features.mid
+        self.assertEqual(plan.quote_mode, "bid_only")
+        self.assertGreater(plan.bid_size, 0.0)
+        self.assertLessEqual(plan.bid_size, base_qty * 0.55)
+
+    def test_extreme_flat_one_way_sell_pressure_uses_probe_size(self) -> None:
+        features = self._features()
+        features.flow_imbalance = -1.0
+        features.book_imbalance = -0.25
+        features.toxicity_score = 1.0
+        features.recent_vol_bps = 3.45
+        features.impulse_bps = -4.8
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        base_qty = self._config().base_order_notional / features.mid
+        self.assertEqual(plan.quote_mode, "ask_only")
+        self.assertGreater(plan.ask_size, 0.0)
+        self.assertLessEqual(plan.ask_size, base_qty * 0.60)
+
+    def test_flat_long_entry_veto_disables_bid_when_bearish_flow_flips(self) -> None:
+        features = self._features()
+        features.flow_imbalance = -0.86
+        features.book_imbalance = 0.20
+        features.impulse_bps = -2.8
+        features.toxicity_score = 0.94
+        plan = build_kevin_quote_plan(
+            features=features,
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        self.assertTrue(plan.quoting_enabled)
+        self.assertEqual(plan.quote_mode, "ask_only")
+        self.assertFalse(plan.bid_enabled)
+        self.assertTrue(plan.ask_enabled)
+        self.assertEqual(plan.bid_reason, "long_adverse_veto")
+        self.assertIn("long_veto=", plan.decision_note)
+
+    def test_entry_side_limits_disable_blocked_flat_side(self) -> None:
+        plan = build_kevin_quote_plan(
+            features=self._features(),
+            inventory_qty=0.0,
+            inventory_avg_price=None,
+            book=self._book(),
+            config=self._config(),
+        )
+        guarded = enforce_kevin_entry_guards(
+            plan=plan,
+            inventory_qty=0.0,
+            bid_block_reason="long_hourly_episode_limit",
+        )
+        self.assertTrue(guarded.quoting_enabled)
+        self.assertEqual(guarded.quote_mode, "ask_only")
+        self.assertFalse(guarded.bid_enabled)
+        self.assertTrue(guarded.ask_enabled)
+        self.assertEqual(guarded.bid_reason, "long_hourly_episode_limit")
+        self.assertIn("entry_guard", guarded.decision_note)
+
     def _features(self) -> MarketFeatures:
         return MarketFeatures(
             sample_exchange_time_ms=1_000,
@@ -145,8 +330,8 @@ class KevinHypeLiquidityCoreTests(unittest.TestCase):
             received_time_ms=1_030,
         )
 
-    def _config(self) -> MMStrategyConfig:
-        return MMStrategyConfig(
+    def _config(self) -> KevinHypeConfig:
+        return KevinHypeConfig(
             account_balance=1000.0,
             leverage=20,
             sample_ms=75,
@@ -229,6 +414,14 @@ class KevinHypeLiquidityCoreTests(unittest.TestCase):
             large_inventory_protection_ratio=0.48,
             fee_bps=0.0,
             slippage_bps=0.8,
+            max_long_episodes_per_day=900,
+            max_short_episodes_per_day=1200,
+            max_long_episodes_per_hour=140,
+            max_short_episodes_per_hour=180,
+            fee_user_fee_source="manual_account_rates",
+            long_entry_veto_flow_imbalance=0.62,
+            long_entry_veto_impulse_bps=1.60,
+            long_entry_veto_toxicity=0.82,
         )
 
 

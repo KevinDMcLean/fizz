@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import math
 import time
-from typing import Optional
+from collections import deque
+from dataclasses import dataclass, replace
+from typing import Deque, Optional
 
 from atlas_mm_feeaware_core import (
     MMStrategyConfig,
@@ -23,6 +25,18 @@ from hyperliquid_fee_model import FeeState
 from pa_pump_pro_core import BookSnapshot, HyperliquidRealtimeMultiFeed, MarketSnapshot
 
 APP_NAME = "Kevin Hype Liquidity Engine"
+
+
+@dataclass
+class KevinHypeConfig(MMStrategyConfig):
+    max_long_episodes_per_day: int = 0
+    max_short_episodes_per_day: int = 0
+    max_long_episodes_per_hour: int = 0
+    max_short_episodes_per_hour: int = 0
+    fee_user_fee_source: str = "estimated_schedule"
+    long_entry_veto_flow_imbalance: float = 0.0
+    long_entry_veto_impulse_bps: float = 0.0
+    long_entry_veto_toxicity: float = 0.0
 
 
 def zero_fee_state(*, turnover: float = 0.0, started_at_ts: Optional[float] = None) -> FeeState:
@@ -63,19 +77,313 @@ def zero_fee_state(*, turnover: float = 0.0, started_at_ts: Optional[float] = No
     )
 
 
+def _inventory_markout_bps(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    inventory_avg_price: Optional[float],
+) -> float:
+    if inventory_qty == 0.0 or inventory_avg_price in (None, 0.0):
+        return 0.0
+    if inventory_qty > 0:
+        return ((features.mid / max(inventory_avg_price, 1e-9)) - 1.0) * 10_000.0
+    return ((inventory_avg_price / max(features.mid, 1e-9)) - 1.0) * 10_000.0
+
+
+def _same_side_pressure_score(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    config: KevinHypeConfig,
+) -> float:
+    if inventory_qty == 0.0:
+        return 0.0
+    aligned_flow = features.flow_imbalance if inventory_qty > 0 else -features.flow_imbalance
+    aligned_book = features.book_imbalance if inventory_qty > 0 else -features.book_imbalance
+    return (
+        (aligned_flow / max(config.one_way_flow_imbalance, 1e-9)) * 0.62
+        + (aligned_book / max(config.one_way_book_imbalance, 1e-9)) * 0.38
+    )
+
+
+def _adverse_inventory_flip_score(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    config: KevinHypeConfig,
+) -> float:
+    if inventory_qty == 0.0:
+        return 0.0
+    adverse_flow = -features.flow_imbalance if inventory_qty > 0 else features.flow_imbalance
+    adverse_impulse = -features.impulse_bps if inventory_qty > 0 else features.impulse_bps
+    adverse_flow_gate = max(config.quote_guard_flow_imbalance, 0.80)
+    impulse_gate = max(config.one_way_alpha_bps, 1.0)
+    return (
+        (max(0.0, adverse_flow) / max(adverse_flow_gate, 1e-9)) * 0.68
+        + (features.toxicity_score / max(adverse_flow_gate, 1e-9)) * 0.24
+        + (max(0.0, adverse_impulse) / max(impulse_gate, 1e-9)) * 0.08
+    )
+
+
+def _long_entry_veto_score(
+    *,
+    features: MarketFeatures,
+    config: KevinHypeConfig,
+) -> float:
+    if (
+        config.long_entry_veto_flow_imbalance <= 0.0
+        or config.long_entry_veto_impulse_bps <= 0.0
+        or config.long_entry_veto_toxicity <= 0.0
+    ):
+        return 0.0
+    adverse_flow = max(0.0, -features.flow_imbalance)
+    adverse_impulse = max(0.0, -features.impulse_bps)
+    supportive_book = max(0.0, features.book_imbalance)
+    return (
+        (adverse_flow / max(config.long_entry_veto_flow_imbalance, 1e-9)) * 0.72
+        + (features.toxicity_score / max(config.long_entry_veto_toxicity, 1e-9)) * 0.20
+        + (adverse_impulse / max(config.long_entry_veto_impulse_bps, 1e-9)) * 0.12
+        - (supportive_book / max(config.one_way_book_imbalance, 1e-9)) * 0.10
+    )
+
+
+def _inventory_unwind_reason(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    config: KevinHypeConfig,
+) -> Optional[str]:
+    if inventory_qty == 0.0:
+        return None
+    adverse_flow = -features.flow_imbalance if inventory_qty > 0 else features.flow_imbalance
+    if (
+        adverse_flow >= max(config.protection_flow_imbalance, 0.55)
+        and _adverse_inventory_flip_score(
+            features=features,
+            inventory_qty=inventory_qty,
+            config=config,
+        ) >= 1.0
+    ):
+        return "adverse_flow_flip_protection"
+    if _same_side_pressure_score(
+        features=features,
+        inventory_qty=inventory_qty,
+        config=config,
+    ) >= 1.0:
+        return "trend_unwind_protection"
+    return None
+
+
+def _protection_exit_quotes(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    inventory_avg_price: Optional[float],
+    exit_size: float,
+    book: Optional[BookSnapshot],
+    config: KevinHypeConfig,
+    protection_reason: str,
+    inv_ratio: float,
+) -> tuple[Optional[float], Optional[float], float, float, int, float]:
+    exit_side = "SELL" if inventory_qty > 0 else "BUY"
+    markout_bps = _inventory_markout_bps(
+        features=features,
+        inventory_qty=inventory_qty,
+        inventory_avg_price=inventory_avg_price,
+    )
+    spread_ticks = max(
+        1,
+        int(round(max(features.ask - features.bid, features.tick_size) / max(features.tick_size, 1e-9))),
+    )
+    available_inside_ticks = max(0, spread_ticks - 1)
+    improvement_ticks = 0
+
+    touch_queue = 0.0
+    if book is not None:
+        if exit_side == "SELL":
+            touch_queue = visible_size_at_price(book.asks, features.ask, features.tick_size)
+        else:
+            touch_queue = visible_size_at_price(book.bids, features.bid, features.tick_size)
+
+    severe_reasons = {
+        "adverse_flow_flip_protection",
+        "markout_protection",
+        "toxic_protection",
+        "size_toxic_protection",
+        "inventory_timeout_protection",
+        "event_regime_protection",
+    }
+    if available_inside_ticks > 0:
+        urgency = 0.0
+        if protection_reason in severe_reasons:
+            urgency += 1.0
+        if protection_reason == "trend_unwind_protection":
+            aligned_flow = features.flow_imbalance if inventory_qty > 0 else -features.flow_imbalance
+            aligned_book = features.book_imbalance if inventory_qty > 0 else -features.book_imbalance
+            urgency += max(0.0, aligned_flow - 0.35) * 0.85
+            urgency += max(0.0, aligned_book - 0.10) * 0.55
+        if protection_reason == "adverse_flow_flip_protection":
+            adverse_flow = -features.flow_imbalance if inventory_qty > 0 else features.flow_imbalance
+            adverse_impulse = -features.impulse_bps if inventory_qty > 0 else features.impulse_bps
+            urgency += max(0.0, adverse_flow - 0.45) * 1.00
+            urgency += max(0.0, adverse_impulse) * 0.12
+        if markout_bps <= 0.0:
+            urgency += min(1.5, abs(markout_bps) / max(config.protection_markout_bps, 1e-9))
+        urgency += max(0.0, features.toxicity_score - 0.55)
+        urgency += max(0.0, abs(inv_ratio) - 0.18) * 1.4
+        if touch_queue > 0.0 and exit_size > 0.0:
+            urgency += min(1.0, touch_queue / exit_size) * 0.6
+
+        if urgency > 0.45:
+            improvement_ticks = 1
+        if urgency > 1.2:
+            improvement_ticks += 1
+        if urgency > 2.0:
+            improvement_ticks += 1
+        improvement_ticks = min(available_inside_ticks, improvement_ticks)
+
+    bid_price = None
+    ask_price = None
+    bid_queue = 0.0
+    ask_queue = 0.0
+    if exit_side == "SELL":
+        ask_price = _round_up(features.ask, features.tick_size)
+        if improvement_ticks > 0:
+            passive_floor = _round_up(features.bid + features.tick_size, features.tick_size)
+            ask_price = _round_up(
+                max(passive_floor, ask_price - (improvement_ticks * features.tick_size)),
+                features.tick_size,
+            )
+        if book is not None:
+            ask_queue = visible_size_at_price(book.asks, ask_price, features.tick_size)
+    else:
+        bid_price = _round_down(features.bid, features.tick_size)
+        if improvement_ticks > 0:
+            passive_ceiling = _round_down(features.ask - features.tick_size, features.tick_size)
+            bid_price = _round_down(
+                min(passive_ceiling, bid_price + (improvement_ticks * features.tick_size)),
+                features.tick_size,
+            )
+        if book is not None:
+            bid_queue = visible_size_at_price(book.bids, bid_price, features.tick_size)
+
+    return bid_price, ask_price, bid_queue, ask_queue, improvement_ticks, markout_bps
+
+
+def enforce_kevin_entry_guards(
+    *,
+    plan: QuotePlan,
+    inventory_qty: float,
+    bid_block_reason: Optional[str] = None,
+    ask_block_reason: Optional[str] = None,
+) -> QuotePlan:
+    if inventory_qty != 0.0 or not plan.quoting_enabled:
+        return plan
+
+    bid_enabled = plan.bid_enabled and plan.bid_price is not None and plan.bid_size > 0.0
+    ask_enabled = plan.ask_enabled and plan.ask_price is not None and plan.ask_size > 0.0
+    bid_reason = plan.bid_reason
+    ask_reason = plan.ask_reason
+    bid_price = plan.bid_price
+    ask_price = plan.ask_price
+    bid_size = plan.bid_size
+    ask_size = plan.ask_size
+    bid_queue = plan.bid_queue_ahead_size
+    ask_queue = plan.ask_queue_ahead_size
+
+    if bid_block_reason is not None and bid_enabled:
+        bid_enabled = False
+        bid_reason = bid_block_reason
+        bid_price = None
+        bid_size = 0.0
+        bid_queue = 0.0
+    if ask_block_reason is not None and ask_enabled:
+        ask_enabled = False
+        ask_reason = ask_block_reason
+        ask_price = None
+        ask_size = 0.0
+        ask_queue = 0.0
+
+    if (
+        bid_enabled == plan.bid_enabled
+        and ask_enabled == plan.ask_enabled
+        and bid_reason == plan.bid_reason
+        and ask_reason == plan.ask_reason
+    ):
+        return plan
+
+    if not bid_enabled and not ask_enabled:
+        return QuotePlan(
+            quoting_enabled=False,
+            quoting_reason="entry_side_limit",
+            fair_value=plan.fair_value,
+            reservation_price=plan.reservation_price,
+            alpha_bps=plan.alpha_bps,
+            inventory_skew_bps=plan.inventory_skew_bps,
+            target_half_spread_bps=plan.target_half_spread_bps,
+            bid_price=None,
+            ask_price=None,
+            bid_size=0.0,
+            ask_size=0.0,
+            bid_queue_ahead_size=0.0,
+            ask_queue_ahead_size=0.0,
+            bid_enabled=False,
+            ask_enabled=False,
+            bid_reason=bid_reason,
+            ask_reason=ask_reason,
+            quote_mode="flat",
+            decision_note=f"flat: entry guard bid={bid_reason} ask={ask_reason}",
+            event_regime=plan.event_regime,
+            toxicity_score=plan.toxicity_score,
+            size_risk_multiplier=plan.size_risk_multiplier,
+        )
+
+    quote_mode = "both" if bid_enabled and ask_enabled else "bid_only" if bid_enabled else "ask_only"
+    decision_note = plan.decision_note
+    guard_bits = []
+    if bid_block_reason is not None and bid_reason == bid_block_reason:
+        guard_bits.append(f"bid={bid_reason}")
+    if ask_block_reason is not None and ask_reason == ask_block_reason:
+        guard_bits.append(f"ask={ask_reason}")
+    if guard_bits:
+        decision_note = f"{plan.decision_note} | entry_guard {' '.join(guard_bits)}"
+
+    return replace(
+        plan,
+        bid_price=bid_price,
+        ask_price=ask_price,
+        bid_size=bid_size,
+        ask_size=ask_size,
+        bid_queue_ahead_size=bid_queue,
+        ask_queue_ahead_size=ask_queue,
+        bid_enabled=bid_enabled,
+        ask_enabled=ask_enabled,
+        bid_reason=bid_reason,
+        ask_reason=ask_reason,
+        quote_mode=quote_mode,
+        decision_note=decision_note,
+    )
+
+
 def build_kevin_quote_plan(
     *,
     features: MarketFeatures,
     inventory_qty: float,
     inventory_avg_price: Optional[float],
     book: Optional[BookSnapshot],
-    config: MMStrategyConfig,
+    config: KevinHypeConfig,
     protection_reason: Optional[str] = None,
 ) -> QuotePlan:
     inv_notional = inventory_qty * features.mid
     inv_ratio = 0.0
     if config.max_inventory_notional > 0:
         inv_ratio = _clamp(inv_notional / config.max_inventory_notional, -1.0, 1.0)
+    if protection_reason is None:
+        protection_reason = _inventory_unwind_reason(
+            features=features,
+            inventory_qty=inventory_qty,
+            config=config,
+        )
 
     if not features.quoting_health_ok:
         return QuotePlan(
@@ -111,18 +419,16 @@ def build_kevin_quote_plan(
     if protection_reason is not None and inventory_qty != 0.0:
         exit_side = "SELL" if inventory_qty > 0 else "BUY"
         exit_size = abs(inventory_qty)
-        bid_price = None
-        ask_price = None
-        bid_queue = 0.0
-        ask_queue = 0.0
-        if exit_side == "SELL":
-            ask_price = _round_up(features.ask, features.tick_size)
-            if book is not None:
-                ask_queue = visible_size_at_price(book.asks, ask_price, features.tick_size)
-        else:
-            bid_price = _round_down(features.bid, features.tick_size)
-            if book is not None:
-                bid_queue = visible_size_at_price(book.bids, bid_price, features.tick_size)
+        bid_price, ask_price, bid_queue, ask_queue, improvement_ticks, markout_bps = _protection_exit_quotes(
+            features=features,
+            inventory_qty=inventory_qty,
+            inventory_avg_price=inventory_avg_price,
+            exit_size=exit_size,
+            book=book,
+            config=config,
+            protection_reason=protection_reason,
+            inv_ratio=inv_ratio,
+        )
         quote_mode = "ask_only" if exit_side == "SELL" else "bid_only"
         return QuotePlan(
             quoting_enabled=True,
@@ -146,7 +452,8 @@ def build_kevin_quote_plan(
             decision_note=(
                 f"{quote_mode}: passive inventory protection because {protection_reason}; "
                 f"flow={features.flow_imbalance:.3f} book={features.book_imbalance:.3f} "
-                f"impulse={features.impulse_bps:.2f}bps"
+                f"impulse={features.impulse_bps:.2f}bps markout={markout_bps:.2f}bps "
+                f"shade={improvement_ticks}t"
             ),
             event_regime=features.event_regime,
             toxicity_score=features.toxicity_score,
@@ -387,6 +694,7 @@ def build_kevin_quote_plan(
     ask_enabled = True
     bid_reason = "active"
     ask_reason = "active"
+    long_entry_veto_score = 0.0
     directional_bias = (
         (features.flow_imbalance / max(config.one_way_flow_imbalance, 1e-9)) * 0.62
         + (features.book_imbalance / max(config.one_way_book_imbalance, 1e-9)) * 0.38
@@ -403,6 +711,17 @@ def build_kevin_quote_plan(
         ask_size = 0.0
         ask_price = None
 
+    if inventory_qty == 0.0:
+        long_entry_veto_score = _long_entry_veto_score(
+            features=features,
+            config=config,
+        )
+        if long_entry_veto_score >= 1.0:
+            bid_enabled = False
+            bid_reason = "long_adverse_veto"
+            bid_size = 0.0
+            bid_price = None
+
     if same_side_limit_reached:
         if inventory_qty > 0:
             bid_enabled = False
@@ -414,6 +733,20 @@ def build_kevin_quote_plan(
             ask_reason = "inventory_limit"
             ask_size = 0.0
             ask_price = None
+
+    if inventory_qty == 0.0 and (bid_enabled != ask_enabled):
+        one_way_cap_multiplier = _clamp(
+            0.95
+            - (0.18 * max(0.0, abs(directional_bias) - 1.0))
+            - (0.30 * max(0.0, features.toxicity_score - 0.55)),
+            0.40,
+            0.95,
+        )
+        one_way_cap_qty = base_qty * one_way_cap_multiplier
+        if bid_enabled:
+            bid_size = min(bid_size, one_way_cap_qty)
+        if ask_enabled:
+            ask_size = min(ask_size, one_way_cap_qty)
 
     if bid_size <= 0 and ask_size <= 0:
         return QuotePlan(
@@ -450,6 +783,8 @@ def build_kevin_quote_plan(
         f"liq_boost={liquidity_bonus_multiplier:.2f} size_risk={size_risk_multiplier:.2f} "
         f"bid={bid_reason} ask={ask_reason}"
     )
+    if inventory_qty == 0.0 and long_entry_veto_score > 0.0:
+        decision_note = f"{decision_note} long_veto={long_entry_veto_score:.2f}"
 
     return QuotePlan(
         quoting_enabled=True,
@@ -478,15 +813,118 @@ def build_kevin_quote_plan(
 
 
 class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
+    def __init__(
+        self,
+        *,
+        asset: str,
+        api_url: str,
+        dex: str,
+        config: KevinHypeConfig,
+        events_jsonl_path: str,
+        samples_jsonl_path: str,
+        fills_csv_path: str,
+        trades_csv_path: str,
+        report_dir: str,
+    ) -> None:
+        super().__init__(
+            asset=asset,
+            api_url=api_url,
+            dex=dex,
+            config=config,
+            events_jsonl_path=events_jsonl_path,
+            samples_jsonl_path=samples_jsonl_path,
+            fills_csv_path=fills_csv_path,
+            trades_csv_path=trades_csv_path,
+            report_dir=report_dir,
+        )
+        self.config: KevinHypeConfig = config
+        self.fee_config.user_fee_source = config.fee_user_fee_source
+        self.daily_long_episode_count = 0
+        self.daily_short_episode_count = 0
+        self.hourly_long_episode_closed_at: Deque[float] = deque()
+        self.hourly_short_episode_closed_at: Deque[float] = deque()
+
     def _configure_fee_model(self) -> None:
+        fee_state = super()._fee_state()
         self._write_event(
-            "kevin_no_cost_mode_enabled",
+            "kevin_fee_model_enabled",
             strategy_name=APP_NAME,
-            note="Maker fees, taker fees, and rebates are disabled in this demo strategy.",
+            fee_rate_source=fee_state.fee_rate_source,
+            maker_rate_bps=fee_state.maker_rate_bps,
+            taker_rate_bps=fee_state.taker_rate_bps,
+            maker_rebate_bps=fee_state.maker_rebate_bps,
+            note=(
+                "Kevin now keeps spread-first quoting, but fills, episode PnL, and kill guards "
+                "use actual fee-aware accounting."
+            ),
         )
 
     def _fee_state(self) -> FeeState:
-        return zero_fee_state(turnover=self.perp_fill_turnover, started_at_ts=self.started_at_ts)
+        return super()._fee_state()
+
+    def _trim_side_hourly_episodes(self, now_ts: float) -> None:
+        cutoff = now_ts - 3600.0
+        while self.hourly_long_episode_closed_at and self.hourly_long_episode_closed_at[0] < cutoff:
+            self.hourly_long_episode_closed_at.popleft()
+        while self.hourly_short_episode_closed_at and self.hourly_short_episode_closed_at[0] < cutoff:
+            self.hourly_short_episode_closed_at.popleft()
+
+    def _entry_side_block_reasons(self, now_ts: float) -> tuple[Optional[str], Optional[str]]:
+        self._trim_side_hourly_episodes(now_ts)
+        bid_block_reason = None
+        ask_block_reason = None
+        if (
+            self.config.max_long_episodes_per_day > 0
+            and self.daily_long_episode_count >= self.config.max_long_episodes_per_day
+        ):
+            bid_block_reason = "long_daily_episode_limit"
+        elif (
+            self.config.max_long_episodes_per_hour > 0
+            and len(self.hourly_long_episode_closed_at) >= self.config.max_long_episodes_per_hour
+        ):
+            bid_block_reason = "long_hourly_episode_limit"
+
+        if (
+            self.config.max_short_episodes_per_day > 0
+            and self.daily_short_episode_count >= self.config.max_short_episodes_per_day
+        ):
+            ask_block_reason = "short_daily_episode_limit"
+        elif (
+            self.config.max_short_episodes_per_hour > 0
+            and len(self.hourly_short_episode_closed_at) >= self.config.max_short_episodes_per_hour
+        ):
+            ask_block_reason = "short_hourly_episode_limit"
+        return bid_block_reason, ask_block_reason
+
+    def _roll_day_if_needed(self) -> None:
+        previous_day = self.current_day_utc
+        super()._roll_day_if_needed()
+        if self.current_day_utc != previous_day:
+            self.daily_long_episode_count = 0
+            self.daily_short_episode_count = 0
+            self.hourly_long_episode_closed_at.clear()
+            self.hourly_short_episode_closed_at.clear()
+
+    def _close_episode(
+        self,
+        episode,
+        *,
+        reason: str,
+        exit_price_avg: float,
+    ) -> None:
+        super()._close_episode(
+            episode,
+            reason=reason,
+            exit_price_avg=exit_price_avg,
+        )
+        if episode.direction == "LONG":
+            self.daily_long_episode_count += 1
+            if episode.closed_at_ts is not None:
+                self.hourly_long_episode_closed_at.append(episode.closed_at_ts)
+        elif episode.direction == "SHORT":
+            self.daily_short_episode_count += 1
+            if episode.closed_at_ts is not None:
+                self.hourly_short_episode_closed_at.append(episode.closed_at_ts)
 
     def _on_market_snapshot(self, market: MarketSnapshot) -> None:
         self.tick_count += 1
@@ -559,7 +997,8 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
                 config=self.config,
             )
 
-        block_reason = self._quoting_block_reason(time.time())
+        now_ts = time.time()
+        block_reason = self._quoting_block_reason(now_ts)
         effective_plan = plan
         if block_reason is not None and self._inventory_qty() == 0.0:
             effective_plan = disable_quote_plan(
@@ -569,6 +1008,14 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
                     f"flat: {block_reason} daily_pnl={self.daily_realized_pnl:.4f} "
                     f"daily_episodes={self.daily_episode_count} hourly_episodes={len(self.hourly_episode_closed_at)}"
                 ),
+            )
+        elif effective_plan.quoting_enabled and self._inventory_qty() == 0.0:
+            bid_block_reason, ask_block_reason = self._entry_side_block_reasons(now_ts)
+            effective_plan = enforce_kevin_entry_guards(
+                plan=effective_plan,
+                inventory_qty=0.0,
+                bid_block_reason=bid_block_reason,
+                ask_block_reason=ask_block_reason,
             )
 
         if effective_plan.quoting_enabled:
@@ -631,10 +1078,12 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
         self.preflight_ok = True
         warm_points = self._warm_start_prices(first_snapshot.quote.microprice)
         self._configure_fee_model()
+        startup_fee_state = self._fee_state()
         self._write_event(
             "bot_started",
             strategy_name=APP_NAME,
-            no_cost_mode=True,
+            no_cost_mode=False,
+            shadow_fee_accounting=True,
             asset=self.asset,
             api_url=self.api_url,
             dex=self.dex,
@@ -693,7 +1142,38 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
             kill_hold_seconds=self.config.kill_hold_seconds,
             kill_on_event_loss_bps=self.config.kill_on_event_loss_bps,
             cooldown_seconds=self.config.cooldown_seconds,
+            max_long_episodes_per_day=self.config.max_long_episodes_per_day,
+            max_short_episodes_per_day=self.config.max_short_episodes_per_day,
+            max_long_episodes_per_hour=self.config.max_long_episodes_per_hour,
+            max_short_episodes_per_hour=self.config.max_short_episodes_per_hour,
             stop_quoting_on_event=self.config.stop_quoting_on_event,
+            long_entry_veto_flow_imbalance=self.config.long_entry_veto_flow_imbalance,
+            long_entry_veto_impulse_bps=self.config.long_entry_veto_impulse_bps,
+            long_entry_veto_toxicity=self.config.long_entry_veto_toxicity,
+            fee_product=self.config.fee_product,
+            fee_market_type=startup_fee_state.market_type,
+            fee_staking_tier=self.config.fee_staking_tier,
+            fee_tier_basis=self.config.fee_tier_basis,
+            fee_user_fee_source=self.config.fee_user_fee_source,
+            fee_target_tier=self.config.fee_target_tier,
+            fee_initial_14d_perps_volume=self.config.fee_initial_14d_perps_volume,
+            fee_initial_14d_spot_volume=self.config.fee_initial_14d_spot_volume,
+            fee_taker_referral_discount_pct=self.config.fee_taker_referral_discount_pct,
+            fee_maker_rebate_bps_override=self.config.fee_maker_rebate_bps_override,
+            fee_user_address=self.config.fee_user_address,
+            fee_user_maker_rate_pct_override=self.fee_config.user_maker_rate_pct_override,
+            fee_user_taker_rate_pct_override=self.fee_config.user_taker_rate_pct_override,
+            fee_buffer_bps=self.config.fee_buffer_bps,
+            fee_kill_buffer_bps=self.config.fee_kill_buffer_bps,
+            expected_taker_share_floor=self.config.expected_taker_share_floor,
+            startup_fee_tier_label=startup_fee_state.tier_label,
+            startup_fee_rate_source=startup_fee_state.fee_rate_source,
+            startup_fee_actual_tier_label=f"Tier{startup_fee_state.actual_tier_index}",
+            startup_fee_projected_tier_label=f"Tier{startup_fee_state.projected_tier_index}",
+            startup_maker_rate_bps=startup_fee_state.maker_rate_bps,
+            startup_taker_rate_bps=startup_fee_state.taker_rate_bps,
+            startup_maker_rebate_bps=startup_fee_state.maker_rebate_bps,
+            startup_projected_14d_weighted_volume=startup_fee_state.projected_weighted_14d_volume,
             slippage_bps=self.config.slippage_bps,
             fee_bps=self.config.fee_bps,
         )
