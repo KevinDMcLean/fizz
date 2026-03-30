@@ -87,6 +87,45 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
 
             self.assertEqual(bot._state_label(signal), "runner")
 
+    def test_campaign_candidate_can_enter_on_first_sample_after_warmup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            now_ms = int(time.time() * 1000)
+            self._seed_campaign_prices(bot, now_ms)
+            bot.started_at_ts = time.time() - 20.0
+
+            signal = bot._build_signal_snapshot(self._campaign_long_snapshot(now_ms))
+            self.assertIsNotNone(signal)
+            assert signal is not None
+            self.assertEqual(signal.long_entry_profile, "campaign")
+            self.assertEqual(signal.regime, "campaign")
+
+            bot._maybe_enter(signal)
+
+            self.assertIsNotNone(bot.position)
+            assert bot.position is not None
+            self.assertEqual(bot.position.entry_profile, "campaign")
+
+    def test_campaign_first_sample_entry_stays_blocked_during_warmup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            now_ms = int(time.time() * 1000)
+            self._seed_campaign_prices(bot, now_ms)
+            bot.started_at_ts = time.time() - 2.0
+
+            signal = bot._build_signal_snapshot(self._campaign_long_snapshot(now_ms))
+            self.assertIsNotNone(signal)
+            assert signal is not None
+            self.assertEqual(signal.long_entry_profile, "campaign")
+            self.assertEqual(signal.regime, "campaign")
+
+            bot._maybe_enter(signal)
+
+            self.assertIsNone(bot.position)
+            self.assertIsNotNone(bot.pending_candidate)
+            assert bot.pending_candidate is not None
+            self.assertEqual(bot.pending_candidate.profile, "campaign")
+
     def test_features_log_writes_candidate_and_label_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -560,18 +599,18 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
     def _campaign_long_snapshot(self, now_ms: int) -> MarketSnapshot:
         return self._snapshot(
             now_ms,
-            bid=101.30,
+            bid=101.31,
             ask=101.34,
-            mid=101.32,
-            micro=101.332,
+            mid=101.325,
+            micro=101.334,
             trades=[
                 TradePrint(side="B", price=101.10, size=5.0, hash="c1", exchange_time_ms=now_ms - 4_000),
                 TradePrint(side="B", price=101.18, size=6.0, hash="c2", exchange_time_ms=now_ms - 2_700),
                 TradePrint(side="B", price=101.27, size=7.5, hash="c3", exchange_time_ms=now_ms - 1_300),
                 TradePrint(side="B", price=101.33, size=8.2, hash="c4", exchange_time_ms=now_ms - 250),
             ],
-            bids=[(101.30, 50.0), (101.29, 48.0), (101.28, 45.0)],
-            asks=[(101.34, 40.0), (101.35, 38.0), (101.36, 35.0)],
+            bids=[(101.31, 50.0), (101.30, 48.0), (101.29, 45.0)],
+            asks=[(101.34, 18.0), (101.35, 16.0), (101.36, 14.0)],
         )
 
     def _balanced_snapshot(self, now_ms: int, *, mid: float) -> MarketSnapshot:

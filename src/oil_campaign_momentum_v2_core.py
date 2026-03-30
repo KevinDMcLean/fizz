@@ -141,6 +141,115 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             return True
         return (now_ts - self.last_break_reclaim_exit_ts) >= self.reclaim_cooldown_seconds
 
+    def _allow_campaign_first_sample_entry(
+        self,
+        signal: MidSignalSnapshot,
+        candidate: CandidateState,
+    ) -> bool:
+        if candidate.profile != "campaign":
+            return False
+        if candidate.count < candidate.required_samples:
+            return False
+        if signal.regime != "campaign":
+            return False
+
+        side = candidate.side
+        campaign_ready = signal.long_ready if side == "LONG" else signal.short_ready
+        if not campaign_ready:
+            return False
+
+        warmup_seconds = max(8.0, self.confirm_impulse_window_seconds * 0.5)
+        if (time.time() - self.started_at_ts) < warmup_seconds:
+            return False
+        if signal.sample_count < max(self.initiative_persistence_windows + 2, 6):
+            return False
+
+        entry_score = signal.long_score if side == "LONG" else signal.short_score
+        opposing_score = signal.short_score if side == "LONG" else signal.long_score
+        score_edge = entry_score - opposing_score
+        directional_breakout = self._directional_breakout_distance(signal, side)
+        directional_confirm = self._directional_confirm_impulse(signal, side)
+        directional_flow = self._directional_flow(signal, side)
+        directional_book = self._directional_book(signal, side)
+        tick_bps = self._tick_bps(signal.mid)
+        effective_breakout_buffer_bps = self._effective_breakout_buffer_bps(signal.mid)
+        instant_breakout_floor_bps = effective_breakout_buffer_bps + max(
+            tick_bps * 0.5,
+            self._effective_probe_breakout_slack_bps(signal.mid) * 0.25,
+        )
+        instant_spread_cap_bps = min(
+            self.max_spread_bps,
+            max(self.probe_max_spread_bps * 1.25, tick_bps * 3.0),
+        )
+
+        if signal.spread_bps > instant_spread_cap_bps:
+            return False
+        if entry_score < max(self.campaign_score_min + 8.0, self.instant_entry_score_min * 0.95):
+            return False
+        if score_edge < max(self.campaign_score_edge_min + 10.0, 40.0):
+            return False
+        if directional_confirm < signal.dynamic_confirm_threshold_bps:
+            return False
+        if directional_breakout < instant_breakout_floor_bps:
+            return False
+        if directional_flow < self.flow_imbalance_min:
+            return False
+        if directional_book < self.book_imbalance_min:
+            return False
+        return True
+
+    def _maybe_enter(self, signal: MidSignalSnapshot) -> None:
+        if signal.regime not in {"tension", "campaign"}:
+            self.pending_candidate = None
+            return
+        candidate = self._update_candidate(signal)
+        if candidate is None:
+            return
+
+        first_sample = candidate.first_seen_exchange_time_ms == signal.sample_exchange_time_ms
+        first_sample_campaign_ready = False
+        if first_sample and not self.startup_state_entry:
+            first_sample_campaign_ready = self._allow_campaign_first_sample_entry(signal, candidate)
+            if not first_sample_campaign_ready:
+                return
+        if candidate.count < candidate.required_samples:
+            return
+        if not self._entry_allowed(time.time()):
+            return
+
+        entry_score = signal.long_score if candidate.side == "LONG" else signal.short_score
+        reason = (
+            f"{candidate.side} {candidate.profile} "
+            f"fast_bps={signal.fast_impulse_bps:.2f} "
+            f"confirm_bps={signal.confirm_impulse_bps:.2f} "
+            f"flow={signal.flow_imbalance:.3f} "
+            f"book={signal.book_imbalance:.3f} "
+            f"score={entry_score:.2f}"
+        )
+        if first_sample_campaign_ready:
+            self._write_event(
+                "campaign_first_sample_ready",
+                side=candidate.side,
+                entry_profile=candidate.profile,
+                candidate_count=candidate.count,
+                required_samples=candidate.required_samples,
+                score=entry_score,
+                score_edge=entry_score
+                - (signal.short_score if candidate.side == "LONG" else signal.long_score),
+                breakout_distance_bps=self._directional_breakout_distance(signal, candidate.side),
+                **signal.to_dict(),
+            )
+        self.signal_confirmed_count += 1
+        self._write_event(
+            "signal_confirmed",
+            side=candidate.side,
+            entry_profile=candidate.profile,
+            required_samples=candidate.required_samples,
+            candidate_count=candidate.count,
+            **signal.to_dict(),
+        )
+        self._open_position(signal, candidate.side, reason, candidate.profile)
+
     def _state_label(self, snapshot: Optional[MidSignalSnapshot]) -> str:
         if snapshot is None:
             return "arm"
