@@ -15,6 +15,8 @@ from oil_campaign_momentum_v2_core import OilCampaignMomentumV2Bot
 DEFAULT_TICK_SIZE = 0.01
 DEFAULT_BREAKOUT_BUFFER_TICKS = 2.0
 DEFAULT_PROBE_BREAKOUT_SLACK_TICKS = 1.0
+DEFAULT_PROBE_MIN_BREAKOUT_FRACTION = 0.55
+DEFAULT_PROBE_MAX_SPREAD_BPS = 2.5
 DEFAULT_BREAKOUT_RECLAIM_TICKS = 2.0
 DEFAULT_ADD_ON_EXTENSION_TICKS = 2.0
 DEFAULT_FAILED_BREAKOUT_TICKS = 3.0
@@ -31,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     extra.add_argument("--tick-size", type=float, default=DEFAULT_TICK_SIZE)
     extra.add_argument("--breakout-buffer-ticks", type=float, default=DEFAULT_BREAKOUT_BUFFER_TICKS)
     extra.add_argument("--probe-breakout-slack-ticks", type=float, default=DEFAULT_PROBE_BREAKOUT_SLACK_TICKS)
+    extra.add_argument("--probe-min-breakout-fraction", type=float, default=DEFAULT_PROBE_MIN_BREAKOUT_FRACTION)
+    extra.add_argument("--probe-max-spread-bps", type=float, default=DEFAULT_PROBE_MAX_SPREAD_BPS)
     extra.add_argument("--breakout-reclaim-ticks", type=float, default=DEFAULT_BREAKOUT_RECLAIM_TICKS)
     extra.add_argument("--add-on-extension-ticks", type=float, default=DEFAULT_ADD_ON_EXTENSION_TICKS)
     extra.add_argument("--failed-breakout-ticks", type=float, default=DEFAULT_FAILED_BREAKOUT_TICKS)
