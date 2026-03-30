@@ -164,6 +164,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         extreme_blocked: bool,
         full_ready: bool,
         reference_price: float | None = None,
+        probe_depth_confirmed: bool = False,
+        probe_initiative_confirmed: bool = False,
     ) -> Optional[str]:
         del extreme_blocked
         direction = 1.0 if side == "LONG" else -1.0
@@ -184,6 +186,16 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         if reference_price is not None and reference_price > 0:
             effective_probe_slack_bps = self._effective_probe_breakout_slack_bps(reference_price)
         probe_boundary = -effective_probe_slack_bps
+        soft_probe = breakout_distance_bps < 0.0
+        required_probe_fast = fast_threshold_bps * self.probe_fast_threshold_ratio
+        required_probe_confirm = confirm_threshold_bps * self.probe_confirm_threshold_ratio
+        if soft_probe:
+            # When we are only inside slack rather than through the level, require both
+            # confirmation modes plus a stronger impulse floor to cut false starts.
+            if not (probe_depth_confirmed and probe_initiative_confirmed):
+                return None
+            required_probe_fast = max(required_probe_fast, fast_threshold_bps * 0.72)
+            required_probe_confirm = max(required_probe_confirm, confirm_threshold_bps * 0.80)
         if (
             self._global_probe_allowed()
             and self._probe_allowed(side)
@@ -191,8 +203,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             and spread_ok
             and score >= self.probe_score_min
             and score_edge >= self.probe_score_edge_min
-            and directional_fast >= fast_threshold_bps * self.probe_fast_threshold_ratio
-            and directional_confirm >= confirm_threshold_bps * self.probe_confirm_threshold_ratio
+            and directional_fast >= required_probe_fast
+            and directional_confirm >= required_probe_confirm
             and breakout_distance_bps >= probe_boundary
             and flow >= (self.flow_imbalance_min * self.probe_flow_multiplier)
             and book >= (self.book_imbalance_min * self.probe_book_multiplier)
@@ -394,6 +406,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             extreme_blocked=False,
             full_ready=long_ready,
             reference_price=quote.mid,
+            probe_depth_confirmed=long_depth_vacuum,
+            probe_initiative_confirmed=long_initiative_persistent,
         )
         short_entry_profile = self._entry_profile(
             side="SHORT",
@@ -411,6 +425,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             extreme_blocked=False,
             full_ready=short_ready,
             reference_price=quote.mid,
+            probe_depth_confirmed=short_depth_vacuum,
+            probe_initiative_confirmed=short_initiative_persistent,
         )
 
         if not spread_ok or loss_risk_blocked:

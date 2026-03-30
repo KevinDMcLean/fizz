@@ -131,6 +131,8 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 spread_ok=True,
                 extreme_blocked=False,
                 full_ready=False,
+                probe_depth_confirmed=True,
+                probe_initiative_confirmed=True,
             )
             tick_aware_profile = bot._entry_profile(
                 side="LONG",
@@ -148,10 +150,37 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 extreme_blocked=False,
                 full_ready=False,
                 reference_price=100.0,
+                probe_depth_confirmed=True,
+                probe_initiative_confirmed=True,
             )
 
             self.assertIsNone(raw_profile)
             self.assertEqual(tick_aware_profile, "probe")
+
+    def test_probe_slack_requires_both_confirmation_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            profile = bot._entry_profile(
+                side="LONG",
+                score=86.0,
+                opposing_score=40.0,
+                fast_impulse_bps=6.8,
+                confirm_impulse_bps=11.5,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=-0.40,
+                flow_imbalance=0.55,
+                book_imbalance=0.30,
+                trade_count_ok=True,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+                reference_price=100.0,
+                probe_depth_confirmed=False,
+                probe_initiative_confirmed=True,
+            )
+
+            self.assertIsNone(profile)
 
     def _make_bot(self, root: Path, **overrides: object) -> OilCampaignMomentumV2Bot:
         params = {
