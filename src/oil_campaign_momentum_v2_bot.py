@@ -70,6 +70,7 @@ def main() -> None:
     config["samples_jsonl_path"] = config.pop("samples_jsonl")
     config["trades_csv_path"] = config.pop("trades_csv")
     config["markouts_jsonl_path"] = config.pop("markouts_jsonl")
+    config["features_jsonl_path"] = config.pop("features_jsonl")
     config.pop("log_level", None)
 
     bot = OilCampaignMomentumV2Bot(**config)
