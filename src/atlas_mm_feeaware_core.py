@@ -1168,11 +1168,14 @@ class ProSpreadMarketMaker:
         except Exception:
             logging.exception("Failed loading exact Hyperliquid market fee metadata; using configured defaults")
 
-        if user_maker_rate_pct_override is not None or user_taker_rate_pct_override is not None:
+        manual_rate_override = (
+            user_maker_rate_pct_override is not None or user_taker_rate_pct_override is not None
+        )
+        if manual_rate_override:
             rate_source = "manual_account_rates"
 
         user_address = (self.config.fee_user_address or "").strip()
-        if user_address:
+        if user_address and not manual_rate_override:
             try:
                 user_fees = self._post_info({"type": "userFees", "user": user_address})
                 if isinstance(user_fees, dict):

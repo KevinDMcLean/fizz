@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -517,6 +518,64 @@ class ProSpreadMarketMakerTests(unittest.TestCase):
         )
         self.assertAlmostEqual(fee_state.maker_rate_bps, 0.29, places=6)
         self.assertAlmostEqual(fee_state.taker_rate_bps, 0.86, places=6)
+
+    def test_fee_state_scales_userfees_schedule_for_growth_mode(self) -> None:
+        config = self._config()
+        fee_state = estimate_fee_state(
+            elapsed_seconds=3600.0,
+            perp_fill_turnover=0.0,
+            config=HyperliquidFeeConfig(
+                product=config.fee_product,
+                market_type="hip3_growth",
+                staking_tier=config.fee_staking_tier,
+                tier_basis="actual",
+                target_tier=config.fee_target_tier,
+                initial_14d_perps_volume=config.fee_initial_14d_perps_volume,
+                initial_14d_spot_volume=config.fee_initial_14d_spot_volume,
+                taker_referral_discount_pct=0.0,
+                maker_rebate_bps_override=0.0,
+                deployer_fee_scale=1.0,
+                growth_mode=True,
+                aligned_quote_token=False,
+                user_maker_rate_pct_override=0.015,
+                user_taker_rate_pct_override=0.045,
+                user_fee_source="userFees",
+            ),
+        )
+        self.assertAlmostEqual(fee_state.maker_rate_bps, 0.30, places=6)
+        self.assertAlmostEqual(fee_state.taker_rate_bps, 0.90, places=6)
+
+    def test_manual_fee_overrides_take_precedence_over_userfees_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp))
+            bot.config = replace(
+                bot.config,
+                fee_user_address="0xabc",
+                fee_user_maker_rate_pct_override=0.0029,
+                fee_user_taker_rate_pct_override=0.0086,
+            )
+            bot.fee_config = replace(
+                bot.fee_config,
+                user_maker_rate_pct_override=0.0029,
+                user_taker_rate_pct_override=0.0086,
+            )
+
+            def fake_post_info(payload):
+                if payload.get("type") == "perpDexs":
+                    return [{"name": "xyz", "deployerFeeScale": 1.0}]
+                if payload.get("type") == "metaAndAssetCtxs":
+                    return [{"universe": [{"name": "xyz:BRENTOIL", "growthMode": "enabled"}], "collateralToken": 0}]
+                if payload.get("type") == "alignedQuoteTokenInfo":
+                    return None
+                if payload.get("type") == "userFees":
+                    return {"userAddRate": 0.00015, "userCrossRate": 0.00045}
+                raise AssertionError(payload)
+
+            bot._post_info = fake_post_info  # type: ignore[method-assign]
+            bot._configure_fee_model()
+            self.assertEqual(bot.fee_config.user_fee_source, "manual_account_rates")
+            self.assertAlmostEqual(bot.fee_config.user_maker_rate_pct_override or 0.0, 0.0029, places=8)
+            self.assertAlmostEqual(bot.fee_config.user_taker_rate_pct_override or 0.0, 0.0086, places=8)
 
     def test_growth_mode_only_contributes_ten_percent_volume_to_tiers(self) -> None:
         fee_state = self._fee_state(

@@ -1,0 +1,46 @@
+{
+  "strategy_name": "Trump Liquidity",
+  "market_name": "WTI Crude (CL)",
+  "description": "Independent CL copy of the fee-aware Atlas market maker with a headline wire for Trump and Iran monitoring.",
+  "asset": "xyz:CL",
+  "dex": "xyz",
+  "dashboard_port": 8797,
+  "dashboard_title": "Trump Liquidity",
+  "dashboard_subtitle": "Independent CL liquidity monitor with display-only Trump and Iran headline context.",
+  "news_keywords": [
+    "trump",
+    "donald trump",
+    "iran",
+    "iranian",
+    "tehran",
+    "middle east",
+    "military",
+    "strike",
+    "missile",
+    "oil",
+    "sanction",
+    "nuclear"
+  ],
+  "news_sources": [
+    {
+      "name": "BBC World",
+      "url": "https://feeds.bbci.co.uk/news/world/rss.xml"
+    },
+    {
+      "name": "BBC Middle East",
+      "url": "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml"
+    },
+    {
+      "name": "Sky News Home",
+      "url": "https://feeds.skynews.com/feeds/rss/home.xml"
+    },
+    {
+      "name": "Sky News World",
+      "url": "https://feeds.skynews.com/feeds/rss/world.xml"
+    },
+    {
+      "name": "Google News Search",
+      "url": "https://news.google.com/rss/search?q=Trump%20Iran%20OR%20Tehran&hl=en-GB&gl=GB&ceid=GB:en"
+    }
+  ]
+}

@@ -21,6 +21,12 @@ python3 scripts/run_market_maker.py --market cl --account paper_default --dashbo
 python3 scripts/run_market_maker.py --market sp500 --account paper_default --dashboard
 ```
 
+### Trump Liquidity
+
+```bash
+python3 scripts/run_trump_liquidity.py --market cl --account paper_default --dashboard
+```
+
 ### Kevin HYPE
 
 ```bash
@@ -31,6 +37,12 @@ python3 scripts/run_kevin_hype.py --market hype --account paper_default --dashbo
 
 ```bash
 python3 scripts/run_mid_momentum.py --market brent_runner --account paper_default --dashboard
+```
+
+### Initiator follower
+
+```bash
+python3 scripts/run_initiator_follower.py --market brent_event_campaign --account paper_default --dashboard
 ```
 
 ### Extreme momentum

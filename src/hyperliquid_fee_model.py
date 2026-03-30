@@ -204,6 +204,9 @@ def fee_rates_for_tier(
     has_user_override = use_user_overrides and (
         config.user_maker_rate_pct_override is not None or config.user_taker_rate_pct_override is not None
     )
+    user_fee_source = (config.user_fee_source or "estimated").strip()
+    has_manual_final_override = has_user_override and user_fee_source == "manual_account_rates"
+    has_user_schedule_override = has_user_override and user_fee_source == "userFees"
     active_referral_discount = max(0.0, min(1.0, config.taker_referral_discount_pct / 100.0))
     scale_if_hip3 = _hip3_scale(deployer_fee_scale) if is_hip3 else 1.0
     growth_mode_scale = 0.1 if growth_mode else 1.0
@@ -215,9 +218,9 @@ def fee_rates_for_tier(
     aligned_taker_scale = ((1.0 - deployer_share) * 0.8 + deployer_share) if aligned_quote_token else 1.0
     aligned_maker_rebate_scale = ((1.0 - deployer_share) * 1.5 + deployer_share) if aligned_quote_token else 1.0
 
-    if has_user_override:
-        # Hyperliquid userFees returns final account-specific rates. Do not apply HIP-3,
-        # referral, or aligned-token scaling again.
+    if has_manual_final_override:
+        # Manual account overrides are treated as final effective rates supplied by the
+        # operator. Do not apply HIP-3, referral, or aligned-token scaling again.
         taker_rate_pct = (
             config.user_taker_rate_pct_override
             if config.user_taker_rate_pct_override is not None
@@ -234,6 +237,31 @@ def fee_rates_for_tier(
         else:
             maker_rate_bps = 0.0
             maker_rebate_bps = (-maker_rate_pct * 100.0) + max(0.0, config.maker_rebate_bps_override)
+        taker_rate_bps = taker_rate_pct * 100.0
+    elif has_user_schedule_override:
+        # Hyperliquid userFees reflects account-tier schedule rates. Market-specific HIP-3
+        # and growth-mode scaling still need to be applied on top of those account rates.
+        base_taker_rate_pct = (
+            config.user_taker_rate_pct_override
+            if config.user_taker_rate_pct_override is not None
+            else table_taker_rate_pct
+        )
+        base_maker_rate_pct = (
+            config.user_maker_rate_pct_override
+            if config.user_maker_rate_pct_override is not None
+            else table_maker_rate_pct
+        )
+        maker_rate_pct = base_maker_rate_pct * growth_mode_scale
+        if maker_rate_pct > 0.0:
+            maker_rate_pct *= scale_if_hip3 * (1.0 - active_referral_discount)
+            maker_rate_bps = maker_rate_pct * 100.0
+            maker_rebate_bps = max(0.0, config.maker_rebate_bps_override)
+        else:
+            maker_rate_pct *= scale_if_hip3 * aligned_maker_rebate_scale
+            maker_rate_bps = 0.0
+            maker_rebate_bps = (-maker_rate_pct * 100.0) + max(0.0, config.maker_rebate_bps_override)
+        taker_rate_pct = base_taker_rate_pct * growth_mode_scale * scale_if_hip3 * aligned_taker_scale
+        taker_rate_pct *= (1.0 - active_referral_discount)
         taker_rate_bps = taker_rate_pct * 100.0
     else:
         maker_rate_pct = table_maker_rate_pct * growth_mode_scale

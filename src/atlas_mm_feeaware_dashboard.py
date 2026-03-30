@@ -7,6 +7,8 @@ import argparse
 import bisect
 import csv
 import json
+import threading
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +19,7 @@ from urllib.parse import urlparse
 from hyperliquid_fee_model import HyperliquidFeeConfig, fee_rates_for_tier
 
 APP_NAME = "Asterion Liquidity Engine"
+SUMMARY_REFRESH_SECONDS = 5.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +55,60 @@ def _read_csv(path: Path) -> List[Dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8", newline="") as fh:
         return list(csv.DictReader(fh))
+
+
+class SummaryCache:
+    def __init__(self, builder, *builder_args: Path) -> None:
+        self._builder = builder
+        self._builder_args = builder_args
+        self._payload_bytes: bytes | None = None
+        self._signature: tuple[tuple[str, int, int], ...] | None = None
+        self._built_at = 0.0
+        self._lock = threading.Lock()
+
+    def _current_signature(self) -> tuple[tuple[str, int, int], ...]:
+        signature: List[tuple[str, int, int]] = []
+        for path in self._builder_args:
+            if path.is_dir():
+                latest_mtime_ns = -1
+                latest_size = 0
+                try:
+                    for child in path.glob("*.md"):
+                        stat = child.stat()
+                        if stat.st_mtime_ns >= latest_mtime_ns:
+                            latest_mtime_ns = stat.st_mtime_ns
+                            latest_size = stat.st_size
+                except OSError:
+                    latest_mtime_ns = -1
+                    latest_size = 0
+                signature.append((str(path), latest_mtime_ns, latest_size))
+                continue
+            try:
+                stat = path.stat()
+                signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((str(path), -1, -1))
+        return tuple(signature)
+
+    def get_json_bytes(self) -> bytes:
+        now = time.monotonic()
+        with self._lock:
+            if self._payload_bytes is not None and now - self._built_at < SUMMARY_REFRESH_SECONDS:
+                return self._payload_bytes
+
+        signature = self._current_signature()
+        with self._lock:
+            if self._payload_bytes is not None and signature == self._signature:
+                self._built_at = now
+                return self._payload_bytes
+
+        payload = self._builder(*self._builder_args)
+        data = json.dumps(payload).encode("utf-8")
+        with self._lock:
+            self._payload_bytes = data
+            self._signature = signature
+            self._built_at = now
+        return data
 
 
 def _parse_utc(raw: Any) -> datetime | None:
@@ -1166,8 +1223,45 @@ def render_html() -> str:
       document.getElementById('trades').innerHTML = tradeRows || '<tr><td colspan="12">No closed episodes yet.</td></tr>';
     }
 
-    refresh();
-    setInterval(refresh, 1000);
+    const VISIBLE_REFRESH_MS = 5000;
+    const HIDDEN_REFRESH_MS = 30000;
+    let refreshTimer = null;
+    let refreshInFlight = false;
+
+    const scheduleRefresh = (delayMs) => {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+      }
+      refreshTimer = setTimeout(() => {
+        refreshLoop().catch(console.error);
+      }, delayMs);
+    };
+
+    async function refreshLoop(force = false) {
+      if (refreshInFlight) {
+        scheduleRefresh(VISIBLE_REFRESH_MS);
+        return;
+      }
+      if (document.hidden && !force) {
+        scheduleRefresh(HIDDEN_REFRESH_MS);
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        await refresh();
+      } finally {
+        refreshInFlight = false;
+        scheduleRefresh(document.hidden ? HIDDEN_REFRESH_MS : VISIBLE_REFRESH_MS);
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        refreshLoop(true).catch(console.error);
+      }
+    });
+
+    refreshLoop(true).catch(console.error);
   </script>
 </body>
 </html>"""
@@ -1180,18 +1274,13 @@ def make_handler(
     trades_path: Path,
     reports_dir: Path,
 ):
+    summary_cache = SummaryCache(build_summary, events_path, samples_path, fills_path, trades_path, reports_dir)
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             if parsed.path == "/api/summary":
-                payload = build_summary(
-                    events_path,
-                    samples_path,
-                    fills_path,
-                    trades_path,
-                    reports_dir,
-                )
-                data = json.dumps(payload).encode("utf-8")
+                data = summary_cache.get_json_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))

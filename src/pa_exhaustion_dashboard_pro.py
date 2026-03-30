@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import threading
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,6 +49,60 @@ def _read_csv(path: Path) -> List[Dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8", newline="") as fh:
         return list(csv.DictReader(fh))
+
+
+class SummaryCache:
+    def __init__(self, builder, *builder_args: Path) -> None:
+        self._builder = builder
+        self._builder_args = builder_args
+        self._payload_bytes: bytes | None = None
+        self._signature: tuple[tuple[str, int, int], ...] | None = None
+        self._built_at = 0.0
+        self._lock = threading.Lock()
+
+    def _current_signature(self) -> tuple[tuple[str, int, int], ...]:
+        signature: List[tuple[str, int, int]] = []
+        for path in self._builder_args:
+            if path.is_dir():
+                latest_mtime_ns = -1
+                latest_size = 0
+                try:
+                    for child in path.glob("*.md"):
+                        stat = child.stat()
+                        if stat.st_mtime_ns >= latest_mtime_ns:
+                            latest_mtime_ns = stat.st_mtime_ns
+                            latest_size = stat.st_size
+                except OSError:
+                    latest_mtime_ns = -1
+                    latest_size = 0
+                signature.append((str(path), latest_mtime_ns, latest_size))
+                continue
+            try:
+                stat = path.stat()
+                signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((str(path), -1, -1))
+        return tuple(signature)
+
+    def get_json_bytes(self) -> bytes:
+        now = time.monotonic()
+        with self._lock:
+            if self._payload_bytes is not None and now - self._built_at < SUMMARY_REFRESH_SECONDS:
+                return self._payload_bytes
+
+        signature = self._current_signature()
+        with self._lock:
+            if self._payload_bytes is not None and signature == self._signature:
+                self._built_at = now
+                return self._payload_bytes
+
+        payload = self._builder(*self._builder_args)
+        data = json.dumps(payload).encode("utf-8")
+        with self._lock:
+            self._payload_bytes = data
+            self._signature = signature
+            self._built_at = now
+        return data
 
 
 def _parse_utc(raw: Any) -> datetime | None:
@@ -720,8 +776,45 @@ def render_html() -> str:
       drawChart("pnlChart", run.pnl_series || [], ["realized_pnl", "total_pnl"], ["#78efc0", "#59d9ff"]);
       drawChart("scoreChart", run.score_series || [], ["long_reversal_score", "short_reversal_score"], ["#f6b74a", "#ff8f98"], 0, 100);
     }
-    refresh().catch(console.error);
-    setInterval(() => refresh().catch(console.error), 2000);
+    const VISIBLE_REFRESH_MS = 5000;
+    const HIDDEN_REFRESH_MS = 30000;
+    let refreshTimer = null;
+    let refreshInFlight = false;
+
+    const scheduleRefresh = (delayMs) => {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+      }
+      refreshTimer = setTimeout(() => {
+        refreshLoop().catch(console.error);
+      }, delayMs);
+    };
+
+    async function refreshLoop(force = false) {
+      if (refreshInFlight) {
+        scheduleRefresh(VISIBLE_REFRESH_MS);
+        return;
+      }
+      if (document.hidden && !force) {
+        scheduleRefresh(HIDDEN_REFRESH_MS);
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        await refresh();
+      } finally {
+        refreshInFlight = false;
+        scheduleRefresh(document.hidden ? HIDDEN_REFRESH_MS : VISIBLE_REFRESH_MS);
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        refreshLoop(true).catch(console.error);
+      }
+    });
+
+    refreshLoop(true).catch(console.error);
   </script>
 </body>
 </html>"""
@@ -733,18 +826,12 @@ class Handler(BaseHTTPRequestHandler):
     trades_path: Path
     markouts_path: Path
     reports_dir: Path
+    summary_cache: SummaryCache
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/api/summary":
-            payload = build_summary(
-                self.events_path,
-                self.samples_path,
-                self.trades_path,
-                self.markouts_path,
-                self.reports_dir,
-            )
-            body = json.dumps(payload).encode("utf-8")
+            body = self.summary_cache.get_json_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -773,6 +860,14 @@ def main() -> None:
     Handler.trades_path = Path(args.trades_csv)
     Handler.markouts_path = Path(args.markouts_jsonl)
     Handler.reports_dir = Path(args.reports_dir)
+    Handler.summary_cache = SummaryCache(
+        build_summary,
+        Handler.events_path,
+        Handler.samples_path,
+        Handler.trades_path,
+        Handler.markouts_path,
+        Handler.reports_dir,
+    )
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Exhaustion reversal dashboard running on http://{args.host}:{args.port}")
     try:
@@ -785,3 +880,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+SUMMARY_REFRESH_SECONDS = 5.0
