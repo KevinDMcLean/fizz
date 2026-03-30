@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from oil_campaign_momentum_v2_core import OilCampaignMomentumV2Bot
+from pa_momo_mid_pro_core import CandidateState
 from pa_pump_pro_core import BookSnapshot, MarketSnapshot, Quote, TradePrint
 
 
@@ -250,6 +252,71 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             self.assertIsNone(soft_profile)
             self.assertIsNone(hard_profile)
             self.assertEqual(clean_profile, "probe")
+
+    def test_soft_probe_seed_requires_extra_confirmation_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1, instant_entry_score_min=120.0)
+            now_ms = int(time.time() * 1000)
+            self._seed_probe_prices(bot, now_ms)
+            probe_signal = bot._build_signal_snapshot(self._probe_long_snapshot(now_ms))
+            assert probe_signal is not None
+
+            soft_seed_signal = replace(
+                probe_signal,
+                sample_exchange_time_ms=probe_signal.sample_exchange_time_ms + 1,
+                breakout_distance_long_bps=-0.30,
+                long_breakout_ok=False,
+                long_entry_profile="probe",
+            )
+            held_break_signal = replace(
+                probe_signal,
+                sample_exchange_time_ms=probe_signal.sample_exchange_time_ms + 80,
+                breakout_distance_long_bps=0.12,
+                long_breakout_ok=True,
+                long_entry_profile="probe",
+            )
+
+            seed_candidate = bot._update_candidate(soft_seed_signal)
+            assert seed_candidate is not None
+            confirm_candidate = bot._update_candidate(held_break_signal)
+            assert confirm_candidate is not None
+
+            self.assertEqual(seed_candidate.required_samples, 3)
+            self.assertEqual(confirm_candidate.required_samples, 3)
+            self.assertEqual(confirm_candidate.count, 2)
+
+    def test_probe_candidate_resets_if_break_not_held_on_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            now_ms = int(time.time() * 1000)
+            self._seed_probe_prices(bot, now_ms)
+            probe_signal = bot._build_signal_snapshot(self._probe_long_snapshot(now_ms))
+            assert probe_signal is not None
+
+            seeded_features = probe_signal.to_dict()
+            seeded_features["_probe_seed_breakout_distance_bps"] = 0.10
+            bot.pending_candidate = CandidateState(
+                side="LONG",
+                profile="probe",
+                required_samples=2,
+                count=1,
+                first_seen_exchange_time_ms=probe_signal.sample_exchange_time_ms - 80,
+                first_seen_ts=time.time() - 1.0,
+                features=seeded_features,
+            )
+
+            failed_hold_signal = replace(
+                probe_signal,
+                sample_exchange_time_ms=probe_signal.sample_exchange_time_ms + 80,
+                breakout_distance_long_bps=-0.25,
+                long_breakout_ok=False,
+                long_entry_profile="probe",
+            )
+
+            updated = bot._update_candidate(failed_hold_signal)
+
+            self.assertIsNone(updated)
+            self.assertIsNone(bot.pending_candidate)
 
     def _make_bot(self, root: Path, **overrides: object) -> OilCampaignMomentumV2Bot:
         params = {

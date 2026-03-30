@@ -700,10 +700,50 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             return False
         return True
 
+    def _candidate_seed_breakout_distance(self, candidate: CandidateState, signal: MidSignalSnapshot) -> float:
+        seed_key = "_probe_seed_breakout_distance_bps"
+        if seed_key in candidate.features:
+            return float(candidate.features[seed_key])
+        return self._directional_breakout_distance(signal, candidate.side)
+
     def _update_candidate(self, signal: MidSignalSnapshot) -> CandidateState | None:
+        previous_candidate = self.pending_candidate
+        previous_seed_breakout_distance: float | None = None
+        if previous_candidate is not None and previous_candidate.profile == "probe":
+            seed_value = previous_candidate.features.get("_probe_seed_breakout_distance_bps")
+            if seed_value is not None:
+                previous_seed_breakout_distance = float(seed_value)
         candidate = super()._update_candidate(signal)
         if candidate is None:
             return None
+        is_new_candidate = candidate.count == 1 and candidate.first_seen_exchange_time_ms == signal.sample_exchange_time_ms
+        directional_breakout = self._directional_breakout_distance(signal, candidate.side)
+        if candidate.profile == "probe":
+            if previous_seed_breakout_distance is not None:
+                seed_breakout_distance = previous_seed_breakout_distance
+            else:
+                seed_breakout_distance = self._candidate_seed_breakout_distance(
+                    previous_candidate if previous_candidate is not None else candidate,
+                    signal,
+                )
+            candidate.features["_probe_seed_breakout_distance_bps"] = seed_breakout_distance
+            if seed_breakout_distance < 0.0:
+                candidate.required_samples = max(candidate.required_samples, self.entry_confirmation_samples + 1)
+            # Probe candidates must actually hold the broken level on the
+            # confirming samples; otherwise we reset and wait for a cleaner break.
+            if not is_new_candidate and directional_breakout < 0.0:
+                self.pending_candidate = None
+                self._write_event(
+                    "probe_hold_reset",
+                    side=candidate.side,
+                    entry_profile=candidate.profile,
+                    breakout_distance_bps=directional_breakout,
+                    seed_breakout_distance_bps=seed_breakout_distance,
+                    candidate_count=candidate.count,
+                    required_samples=candidate.required_samples,
+                    **signal.to_dict(),
+                )
+                return None
         if candidate.count == 1 and candidate.first_seen_exchange_time_ms == signal.sample_exchange_time_ms:
             self._write_feature_row(
                 {
