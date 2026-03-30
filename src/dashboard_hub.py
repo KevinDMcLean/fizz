@@ -35,7 +35,7 @@ DASHBOARD_TARGETS: List[Dict[str, str]] = [
         "url": "http://127.0.0.1:8795/",
         "summary_url": "http://127.0.0.1:8795/api/summary",
         "umbrella": "market-making",
-        "family": "Kevin engine",
+        "family": "Kevin Market Making",
         "scope": "Shared Kevin engine code affects Kevin HYPE and Kevin CL. HYPE config changes affect only HYPE.",
         "fallback_market": "HYPE",
     },
@@ -46,7 +46,7 @@ DASHBOARD_TARGETS: List[Dict[str, str]] = [
         "url": "http://127.0.0.1:8798/",
         "summary_url": "http://127.0.0.1:8798/api/summary",
         "umbrella": "market-making",
-        "family": "Kevin engine",
+        "family": "Kevin Market Making",
         "scope": "Shared Kevin engine code affects Kevin HYPE and Kevin CL. CL-specific config changes affect only Kevin CL.",
         "fallback_market": "CL",
     },
@@ -57,7 +57,7 @@ DASHBOARD_TARGETS: List[Dict[str, str]] = [
         "url": "http://127.0.0.1:8801/",
         "summary_url": "http://127.0.0.1:8801/api/summary",
         "umbrella": "momentum",
-        "family": "Oil Campaign Momentum v2",
+        "family": "Oil Momentum",
         "scope": "Oil momentum code affects only the oil campaign strategy, not Kevin.",
         "fallback_market": "BRENTOIL",
     },
@@ -68,7 +68,7 @@ DASHBOARD_TARGETS: List[Dict[str, str]] = [
         "url": "http://127.0.0.1:8802/",
         "summary_url": "http://127.0.0.1:8802/api/summary",
         "umbrella": "momentum",
-        "family": "Oil Campaign Momentum v2",
+        "family": "Oil Momentum",
         "scope": "Oil momentum code affects only the oil campaign strategy, not Kevin.",
         "fallback_market": "CL",
     },
@@ -230,69 +230,71 @@ def render_dashboard_hub(statuses: List[Dict[str, Any]], generated_at: str) -> s
       color: var(--text);
     }}
     .shell {{
-      max-width: 1240px;
+      max-width: 1440px;
       margin: 0 auto;
-      padding: 28px;
+      padding: 18px 22px 20px;
     }}
     .hero {{
       display: grid;
-      gap: 12px;
-      margin-bottom: 22px;
+      gap: 8px;
+      margin-bottom: 14px;
     }}
     .hero h1 {{
       margin: 0;
-      font-size: 42px;
+      font-size: 34px;
       line-height: 1.05;
       letter-spacing: -0.03em;
     }}
     .hero p {{
       margin: 0;
       color: var(--muted);
-      font-size: 18px;
-      max-width: 880px;
+      font-size: 15px;
+      max-width: 980px;
     }}
     .rules {{
       background: rgba(16, 37, 59, 0.78);
       border: 1px solid var(--line);
       border-radius: 18px;
-      padding: 16px 18px;
+      padding: 12px 14px;
       color: var(--muted);
-      line-height: 1.55;
+      line-height: 1.45;
+      font-size: 14px;
     }}
     .rules strong {{ color: var(--text); }}
     .grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 18px;
-      margin-top: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+      margin-top: 10px;
     }}
     .umbrella-section {{
-      margin-top: 26px;
+      margin-top: 16px;
     }}
     .section-head {{
       display: grid;
-      gap: 6px;
-      margin-bottom: 8px;
+      gap: 4px;
+      margin-bottom: 4px;
     }}
     .section-title {{
-      font-size: 14px;
+      font-size: 13px;
       text-transform: uppercase;
       letter-spacing: 0.18em;
       color: var(--amber);
     }}
     .section-copy {{
       color: var(--muted);
-      line-height: 1.5;
-      max-width: 980px;
+      line-height: 1.4;
+      max-width: 1080px;
+      font-size: 14px;
     }}
     .card {{
       background: linear-gradient(180deg, rgba(13,29,46,0.98), rgba(9,22,34,0.98));
       border: 1px solid var(--line);
       border-radius: 22px;
-      padding: 20px;
+      padding: 16px;
       box-shadow: 0 14px 34px rgba(0, 0, 0, 0.18);
       display: grid;
-      gap: 14px;
+      gap: 10px;
     }}
     .card-top {{
       display: flex;
@@ -304,11 +306,11 @@ def render_dashboard_hub(statuses: List[Dict[str, Any]], generated_at: str) -> s
       color: var(--blue);
       text-transform: uppercase;
       letter-spacing: 0.14em;
-      font-size: 12px;
+      font-size: 11px;
     }}
     h2 {{
       margin: 4px 0 0;
-      font-size: 30px;
+      font-size: 24px;
       line-height: 1.02;
       letter-spacing: -0.03em;
     }}
@@ -331,18 +333,24 @@ def render_dashboard_hub(statuses: List[Dict[str, Any]], generated_at: str) -> s
     .meta, .scope {{
       color: var(--muted);
       line-height: 1.45;
+      font-size: 14px;
     }}
     .headline {{
       color: var(--text);
-      min-height: 48px;
+      min-height: 38px;
       line-height: 1.45;
+      font-size: 14px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }}
     .button {{
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 52px;
-      padding: 0 18px;
+      min-height: 44px;
+      padding: 0 16px;
       border-radius: 14px;
       background: linear-gradient(135deg, var(--amber), #ffb86c);
       color: #111922;
@@ -351,9 +359,14 @@ def render_dashboard_hub(statuses: List[Dict[str, Any]], generated_at: str) -> s
       letter-spacing: 0.01em;
     }}
     .footer {{
-      margin-top: 22px;
+      margin-top: 14px;
       color: var(--muted);
-      font-size: 14px;
+      font-size: 13px;
+    }}
+    @media (min-width: 1180px) {{
+      .grid {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
     }}
   </style>
 </head>
