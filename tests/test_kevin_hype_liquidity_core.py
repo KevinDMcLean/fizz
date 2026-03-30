@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,7 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from atlas_mm_feeaware_core import MarketFeatures
-from kevin_hype_liquidity_core import KevinHypeConfig, build_kevin_quote_plan, enforce_kevin_entry_guards, zero_fee_state
+from kevin_hype_liquidity_core import KevinHypeConfig, KevinHypeLiquidityEngine, build_kevin_quote_plan, enforce_kevin_entry_guards, zero_fee_state
 from pa_pump_pro_core import BookSnapshot
 
 
@@ -23,6 +24,22 @@ class KevinHypeLiquidityCoreTests(unittest.TestCase):
         self.assertEqual(state.maker_rebate_bps, 0.0)
         self.assertEqual(state.net_maker_rate_bps, 0.0)
         self.assertEqual(state.fee_rate_source, "kevin_no_cost_demo")
+
+    def test_engine_init_applies_fee_user_fee_source_without_mutating_frozen_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bot = KevinHypeLiquidityEngine(
+                asset="xyz:CL",
+                api_url="https://api.hyperliquid.xyz",
+                dex="xyz",
+                config=self._config(),
+                events_jsonl_path=str(root / "events.jsonl"),
+                samples_jsonl_path=str(root / "samples.jsonl"),
+                fills_csv_path=str(root / "fills.csv"),
+                trades_csv_path=str(root / "trades.csv"),
+                report_dir=str(root / "reports"),
+            )
+            self.assertEqual(bot.fee_config.user_fee_source, "manual_account_rates")
 
     def test_healthy_tape_quotes_both_sides(self) -> None:
         plan = build_kevin_quote_plan(

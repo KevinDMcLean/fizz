@@ -838,7 +838,7 @@ class KevinHypeLiquidityEngine(ProSpreadMarketMaker):
             report_dir=report_dir,
         )
         self.config: KevinHypeConfig = config
-        self.fee_config.user_fee_source = config.fee_user_fee_source
+        self.fee_config = replace(self.fee_config, user_fee_source=config.fee_user_fee_source)
         self.daily_long_episode_count = 0
         self.daily_short_episode_count = 0
         self.hourly_long_episode_closed_at: Deque[float] = deque()
