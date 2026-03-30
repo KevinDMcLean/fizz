@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List
@@ -115,7 +116,7 @@ def _safe_get(payload: Any, *keys: str) -> Any:
 
 def _fetch_summary(url: str) -> Dict[str, Any] | None:
     try:
-        with urlopen(url, timeout=1.5) as response:
+        with urlopen(url, timeout=15.0) as response:
             raw = response.read().decode("utf-8")
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
@@ -125,10 +126,16 @@ def _fetch_summary(url: str) -> Dict[str, Any] | None:
     return None
 
 
+def _fetch_target_status(target: Dict[str, str]) -> tuple[str, Dict[str, Any] | None]:
+    return target["slug"], _fetch_summary(target["summary_url"])
+
+
 def collect_dashboard_statuses() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(8, max(len(DASHBOARD_TARGETS), 1))) as pool:
+        summary_by_slug = dict(pool.map(_fetch_target_status, DASHBOARD_TARGETS))
     for target in DASHBOARD_TARGETS:
-        summary = _fetch_summary(target["summary_url"])
+        summary = summary_by_slug.get(target["slug"])
         current_run = summary.get("current_run") if isinstance(summary, dict) else None
         latest_sample = current_run.get("latest_sample") if isinstance(current_run, dict) else None
 
@@ -154,12 +161,16 @@ def collect_dashboard_statuses() -> List[Dict[str, Any]]:
         headline = (
             _safe_get(current_run, "headline")
             or _safe_get(current_run, "operator_read")
+            or _safe_get(current_run, "focus_title")
             or _safe_get(current_run, "focus_body")
+            or _safe_get(current_run, "latest_sample", "decision_note")
+            or _safe_get(current_run, "latest_sample", "quoting_reason")
             or "No live summary available yet."
         )
         port = urlparse(target["url"]).port or ""
         rows.append(
             {
+                "slug": target["slug"],
                 "umbrella": target["umbrella"],
                 "name": target["name"],
                 "button_label": target["button_label"],

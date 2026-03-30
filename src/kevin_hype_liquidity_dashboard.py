@@ -1700,7 +1700,7 @@ def render_html() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kevin Hype Liquidity Engine</title>
+  <title>Kevin Liquidity Engine</title>
   <style>
     :root {
       --bg-a: #05080f;
@@ -1864,7 +1864,7 @@ def render_html() -> str:
   <main>
     <div class="topbar">
       <div class="stack">
-        <h1>Kevin Hype Liquidity Engine</h1>
+        <h1 id="app-title">Kevin Liquidity Engine</h1>
         <p class="meta" id="stamp">Loading...</p>
       </div>
       <div class="stack" style="justify-items:end;">
@@ -1972,6 +1972,26 @@ def render_html() -> str:
       if (Number.isNaN(num)) return String(value);
       const sign = num < 0 ? '-' : '';
       return `${sign}$${Math.abs(num).toFixed(digits)}`;
+    };
+
+    const instrumentLabel = (cur = {}) => {
+      const market = String(cur.market_name || '').trim();
+      const asset = String(cur.asset || '').trim();
+      const marketUpper = market.toUpperCase();
+      const assetUpper = asset.toUpperCase();
+      if (assetUpper === 'HYPE' || marketUpper === 'HYPE') return 'HYPE Crypto Perpetual';
+      if (assetUpper === 'CL' || marketUpper.includes('WTI')) return 'WTI Crude (CL)';
+      return market || asset || 'Unknown market';
+    };
+
+    const instrumentUnits = (cur = {}) => {
+      const market = String(cur.market_name || '').trim();
+      const asset = String(cur.asset || '').trim();
+      const marketUpper = market.toUpperCase();
+      const assetUpper = asset.toUpperCase();
+      if (assetUpper === 'HYPE' || marketUpper === 'HYPE') return 'HYPE';
+      if (assetUpper === 'CL' || marketUpper.includes('WTI')) return 'CL';
+      return asset || market || 'units';
     };
 
     const marginPct = (pnl, turnover) => {
@@ -2182,14 +2202,18 @@ def render_html() -> str:
       const behaviour = behaviourVerdict(sample, cur, cap);
       const availableProfiles = (cur.available_profiles || []).map((item) => item.slug || item.market_name || '').filter(Boolean);
       const switchHint = cur.switch_command || '.\\.venv\\Scripts\\python.exe .\\scripts\\run_kevin_hype.py --market <profile>';
+      const instrument = instrumentLabel(cur);
+      const unitsLabel = instrumentUnits(cur);
 
       document.getElementById('stamp').textContent = `Updated ${data.generated_at_utc}`;
-      document.getElementById('market-chip').textContent = `Market ${cur.market_name || cur.asset || 'n/a'} | Venue ${cur.venue_name || 'n/a'} | Account ${cur.account_name || 'n/a'}`;
+      document.title = `${instrument} | Kevin Liquidity Engine`;
+      document.getElementById('app-title').textContent = `Kevin Liquidity Engine - ${instrument}`;
+      document.getElementById('market-chip').textContent = `Trading ${instrument} | Venue ${cur.venue_name || 'n/a'} | Account ${cur.account_name || 'n/a'}`;
       document.getElementById('datasource').textContent = `Source: ${decision.data_source || 'n/a'}`;
       document.getElementById('headline').textContent = decision.headline || 'No decision text yet.';
       document.getElementById('decision-note').textContent = decision.note || 'Waiting for the next sample.';
       document.getElementById('market-context').textContent =
-        `Trading ${cur.market_name || 'n/a'} (${cur.asset || 'n/a'}) on ${cur.venue_name || 'n/a'} | profile ${cur.active_profile_slug || 'n/a'} | account ${cur.account_name || 'n/a'}`;
+        `Trading ${instrument} on ${cur.venue_name || 'n/a'} | profile ${cur.active_profile_slug || 'n/a'} | account ${cur.account_name || 'n/a'}`;
       document.getElementById('switch-note').textContent =
         `One Kevin bot process trades one market at a time. Available profiles: ${availableProfiles.join(', ') || 'none found'}. Switch with: ${switchHint}`;
       document.getElementById('freshness').className = `pill ${cls(decision.freshness, 'state')}`;
@@ -2197,7 +2221,7 @@ def render_html() -> str:
         `Feed ${decision.freshness || 'unknown'} | age ${fmt(cur.current_quote_age_ms, 0)} ms / cap ${fmt(cur.configured_max_quote_age_ms, 0)} ms`;
 
       document.getElementById('hero-stats').innerHTML =
-        metric('Market', `${cur.market_name || 'n/a'} / ${cur.asset || 'n/a'}`, `${cur.venue_name || 'n/a'} | acct ${cur.account_name || 'n/a'}`) +
+        metric('Market', instrument, `${cur.venue_name || 'n/a'} | acct ${cur.account_name || 'n/a'}`) +
         metric('Run State', data.run_state || 'unknown', 'engine state', cls(data.run_state, 'state')) +
         metric('Quote Mode', sample.quote_mode || 'n/a', sample.quoting_reason || 'n/a', sample.quoting_enabled ? 'good' : 'warn') +
         metric('Gross Total PnL', usd(grossTotal, 4), `margin ${pct(grossTotalMarginPct, 3)} on ${usd(fillTurnover, 0)} traded | before fees/rebates`, cls(grossTotal, 'pnl')) +
@@ -2273,7 +2297,7 @@ def render_html() -> str:
         metric('Max Fill Size', `${usd(size.passive_fill_max_notional, 0)} notional`, `${fmt(size.passive_fill_max_notional && size.buying_power ? (size.passive_fill_max_notional / size.buying_power) * 100 : null, 2)}% of buying power`) +
         metric('Touch Share', `${fmt(size.passive_fill_avg_touch_share_pct, 1)}% avg`, `p95 ${fmt(size.passive_fill_p95_touch_share_pct, 1)}% | >50% touch count ${fmt(size.passive_fill_over_50pct_touch_count, 0)}`) +
         metric('Queue Ahead At Fill', `${fmt(size.passive_fill_queue_ahead_avg, 1)} avg`, `p95 ${fmt(size.passive_fill_queue_ahead_p95, 1)}`) +
-        metric('Notional Throughput', usd(fillTurnover, 0), `${fmt(size.fill_turnover_units, 2)} HYPE traded this run`) +
+        metric('Notional Throughput', usd(fillTurnover, 0), `${fmt(size.fill_turnover_units, 2)} ${unitsLabel} traded this run`) +
         metric('Closed Turnover', usd(closedTurnover, 0), `realised spread ${fmt(cur.avg_realized_spread_bps, 3)} bps`) +
         metric('Fee Mode', feeModeLabel, `${cur.fee_precision_note || 'fee estimate detail unavailable'} | basis ${feeBasis}`) +
         metric('Sizing Read', behaviour, `size risk ${fmt(sample.size_risk_multiplier, 2)}x | quote mode ${sample.quote_mode || 'n/a'}`);

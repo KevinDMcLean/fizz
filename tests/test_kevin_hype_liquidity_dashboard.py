@@ -12,10 +12,22 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kevin_hype_liquidity_dashboard import DashboardSummaryCache
+from kevin_hype_liquidity_dashboard import DashboardSummaryCache, render_html
 
 
 class KevinHypeLiquidityDashboardTests(unittest.TestCase):
+    def test_render_html_labels_kevin_instrument_clearly(self) -> None:
+        html = render_html()
+
+        self.assertIn('id="app-title"', html)
+        self.assertIn("const instrumentLabel = (cur = {}) => {", html)
+        self.assertIn("const instrumentUnits = (cur = {}) => {", html)
+        self.assertIn("document.title = `${instrument} | Kevin Liquidity Engine`;", html)
+        self.assertIn("Kevin Liquidity Engine - ${instrument}", html)
+        self.assertIn("Trading ${instrument} | Venue ${cur.venue_name || 'n/a'} | Account ${cur.account_name || 'n/a'}", html)
+        self.assertIn("`${fmt(size.fill_turnover_units, 2)} ${unitsLabel} traded this run`", html)
+        self.assertNotIn("HYPE traded this run", html)
+
     def test_dashboard_cache_refreshes_incrementally(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

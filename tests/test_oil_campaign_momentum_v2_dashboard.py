@@ -18,6 +18,13 @@ class OilCampaignMomentumV2DashboardTests(unittest.TestCase):
 
         self.assertIn('id="appTitle"', html)
         self.assertIn('id="subTitle"', html)
+        self.assertIn("Oil Momentum Trader", html)
+        self.assertIn("What It Is Doing Now", html)
+        self.assertIn("Market And Strategy", html)
+        self.assertIn('id="operatorSummary"', html)
+        self.assertIn("Trading ${marketLabel} oil momentum.", html)
+        self.assertIn("PnL This Session", html)
+        self.assertIn("Why It Is Waiting Or Trading", html)
         self.assertIn('document.title = `${marketLabel} | Oil Campaign Momentum v2`;', html)
         self.assertIn("[`market:${marketLabel}`, \"\"]", html)
         self.assertNotIn("live mid-frequency Brent momentum engine", html)
