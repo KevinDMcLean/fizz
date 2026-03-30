@@ -63,6 +63,177 @@ def zero_fee_state(*, turnover: float = 0.0, started_at_ts: Optional[float] = No
     )
 
 
+def _inventory_markout_bps(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    inventory_avg_price: Optional[float],
+) -> float:
+    if inventory_qty == 0.0 or inventory_avg_price in (None, 0.0):
+        return 0.0
+    if inventory_qty > 0:
+        return ((features.mid / max(inventory_avg_price, 1e-9)) - 1.0) * 10_000.0
+    return ((inventory_avg_price / max(features.mid, 1e-9)) - 1.0) * 10_000.0
+
+
+def _same_side_pressure_score(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    config: MMStrategyConfig,
+) -> float:
+    if inventory_qty == 0.0:
+        return 0.0
+    aligned_flow = features.flow_imbalance if inventory_qty > 0 else -features.flow_imbalance
+    aligned_book = features.book_imbalance if inventory_qty > 0 else -features.book_imbalance
+    return (
+        (aligned_flow / max(config.one_way_flow_imbalance, 1e-9)) * 0.62
+        + (aligned_book / max(config.one_way_book_imbalance, 1e-9)) * 0.38
+    )
+
+
+def _adverse_inventory_flip_score(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    config: MMStrategyConfig,
+) -> float:
+    if inventory_qty == 0.0:
+        return 0.0
+    adverse_flow = -features.flow_imbalance if inventory_qty > 0 else features.flow_imbalance
+    adverse_impulse = -features.impulse_bps if inventory_qty > 0 else features.impulse_bps
+    adverse_flow_gate = max(config.quote_guard_flow_imbalance, 0.80)
+    impulse_gate = max(config.one_way_alpha_bps, 1.0)
+    return (
+        (max(0.0, adverse_flow) / max(adverse_flow_gate, 1e-9)) * 0.68
+        + (features.toxicity_score / max(adverse_flow_gate, 1e-9)) * 0.24
+        + (max(0.0, adverse_impulse) / max(impulse_gate, 1e-9)) * 0.08
+    )
+
+
+def _inventory_unwind_reason(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    config: MMStrategyConfig,
+) -> Optional[str]:
+    if inventory_qty == 0.0:
+        return None
+    adverse_flow = -features.flow_imbalance if inventory_qty > 0 else features.flow_imbalance
+    if (
+        adverse_flow >= max(config.protection_flow_imbalance, 0.55)
+        and _adverse_inventory_flip_score(
+            features=features,
+            inventory_qty=inventory_qty,
+            config=config,
+        ) >= 1.0
+    ):
+        return "adverse_flow_flip_protection"
+    if _same_side_pressure_score(
+        features=features,
+        inventory_qty=inventory_qty,
+        config=config,
+    ) >= 1.0:
+        return "trend_unwind_protection"
+    return None
+
+
+def _protection_exit_quotes(
+    *,
+    features: MarketFeatures,
+    inventory_qty: float,
+    inventory_avg_price: Optional[float],
+    exit_size: float,
+    book: Optional[BookSnapshot],
+    config: MMStrategyConfig,
+    protection_reason: str,
+    inv_ratio: float,
+) -> tuple[Optional[float], Optional[float], float, float, int, float]:
+    exit_side = "SELL" if inventory_qty > 0 else "BUY"
+    markout_bps = _inventory_markout_bps(
+        features=features,
+        inventory_qty=inventory_qty,
+        inventory_avg_price=inventory_avg_price,
+    )
+    spread_ticks = max(
+        1,
+        int(round(max(features.ask - features.bid, features.tick_size) / max(features.tick_size, 1e-9))),
+    )
+    available_inside_ticks = max(0, spread_ticks - 1)
+    improvement_ticks = 0
+
+    touch_queue = 0.0
+    if book is not None:
+        if exit_side == "SELL":
+            touch_queue = visible_size_at_price(book.asks, features.ask, features.tick_size)
+        else:
+            touch_queue = visible_size_at_price(book.bids, features.bid, features.tick_size)
+
+    severe_reasons = {
+        "adverse_flow_flip_protection",
+        "markout_protection",
+        "toxic_protection",
+        "size_toxic_protection",
+        "inventory_timeout_protection",
+        "event_regime_protection",
+    }
+    if available_inside_ticks > 0:
+        urgency = 0.0
+        if protection_reason in severe_reasons:
+            urgency += 1.0
+        if protection_reason == "trend_unwind_protection":
+            aligned_flow = features.flow_imbalance if inventory_qty > 0 else -features.flow_imbalance
+            aligned_book = features.book_imbalance if inventory_qty > 0 else -features.book_imbalance
+            urgency += max(0.0, aligned_flow - 0.35) * 0.85
+            urgency += max(0.0, aligned_book - 0.10) * 0.55
+        if protection_reason == "adverse_flow_flip_protection":
+            adverse_flow = -features.flow_imbalance if inventory_qty > 0 else features.flow_imbalance
+            adverse_impulse = -features.impulse_bps if inventory_qty > 0 else features.impulse_bps
+            urgency += max(0.0, adverse_flow - 0.45) * 1.00
+            urgency += max(0.0, adverse_impulse) * 0.12
+        if markout_bps <= 0.0:
+            urgency += min(1.5, abs(markout_bps) / max(config.protection_markout_bps, 1e-9))
+        urgency += max(0.0, features.toxicity_score - 0.55)
+        urgency += max(0.0, abs(inv_ratio) - 0.18) * 1.4
+        if touch_queue > 0.0 and exit_size > 0.0:
+            urgency += min(1.0, touch_queue / exit_size) * 0.6
+
+        if urgency > 0.45:
+            improvement_ticks = 1
+        if urgency > 1.2:
+            improvement_ticks += 1
+        if urgency > 2.0:
+            improvement_ticks += 1
+        improvement_ticks = min(available_inside_ticks, improvement_ticks)
+
+    bid_price = None
+    ask_price = None
+    bid_queue = 0.0
+    ask_queue = 0.0
+    if exit_side == "SELL":
+        ask_price = _round_up(features.ask, features.tick_size)
+        if improvement_ticks > 0:
+            passive_floor = _round_up(features.bid + features.tick_size, features.tick_size)
+            ask_price = _round_up(
+                max(passive_floor, ask_price - (improvement_ticks * features.tick_size)),
+                features.tick_size,
+            )
+        if book is not None:
+            ask_queue = visible_size_at_price(book.asks, ask_price, features.tick_size)
+    else:
+        bid_price = _round_down(features.bid, features.tick_size)
+        if improvement_ticks > 0:
+            passive_ceiling = _round_down(features.ask - features.tick_size, features.tick_size)
+            bid_price = _round_down(
+                min(passive_ceiling, bid_price + (improvement_ticks * features.tick_size)),
+                features.tick_size,
+            )
+        if book is not None:
+            bid_queue = visible_size_at_price(book.bids, bid_price, features.tick_size)
+
+    return bid_price, ask_price, bid_queue, ask_queue, improvement_ticks, markout_bps
+
+
 def build_kevin_quote_plan(
     *,
     features: MarketFeatures,
@@ -76,6 +247,12 @@ def build_kevin_quote_plan(
     inv_ratio = 0.0
     if config.max_inventory_notional > 0:
         inv_ratio = _clamp(inv_notional / config.max_inventory_notional, -1.0, 1.0)
+    if protection_reason is None:
+        protection_reason = _inventory_unwind_reason(
+            features=features,
+            inventory_qty=inventory_qty,
+            config=config,
+        )
 
     if not features.quoting_health_ok:
         return QuotePlan(
@@ -111,18 +288,16 @@ def build_kevin_quote_plan(
     if protection_reason is not None and inventory_qty != 0.0:
         exit_side = "SELL" if inventory_qty > 0 else "BUY"
         exit_size = abs(inventory_qty)
-        bid_price = None
-        ask_price = None
-        bid_queue = 0.0
-        ask_queue = 0.0
-        if exit_side == "SELL":
-            ask_price = _round_up(features.ask, features.tick_size)
-            if book is not None:
-                ask_queue = visible_size_at_price(book.asks, ask_price, features.tick_size)
-        else:
-            bid_price = _round_down(features.bid, features.tick_size)
-            if book is not None:
-                bid_queue = visible_size_at_price(book.bids, bid_price, features.tick_size)
+        bid_price, ask_price, bid_queue, ask_queue, improvement_ticks, markout_bps = _protection_exit_quotes(
+            features=features,
+            inventory_qty=inventory_qty,
+            inventory_avg_price=inventory_avg_price,
+            exit_size=exit_size,
+            book=book,
+            config=config,
+            protection_reason=protection_reason,
+            inv_ratio=inv_ratio,
+        )
         quote_mode = "ask_only" if exit_side == "SELL" else "bid_only"
         return QuotePlan(
             quoting_enabled=True,
@@ -146,7 +321,8 @@ def build_kevin_quote_plan(
             decision_note=(
                 f"{quote_mode}: passive inventory protection because {protection_reason}; "
                 f"flow={features.flow_imbalance:.3f} book={features.book_imbalance:.3f} "
-                f"impulse={features.impulse_bps:.2f}bps"
+                f"impulse={features.impulse_bps:.2f}bps markout={markout_bps:.2f}bps "
+                f"shade={improvement_ticks}t"
             ),
             event_regime=features.event_regime,
             toxicity_score=features.toxicity_score,
@@ -414,6 +590,20 @@ def build_kevin_quote_plan(
             ask_reason = "inventory_limit"
             ask_size = 0.0
             ask_price = None
+
+    if inventory_qty == 0.0 and (bid_enabled != ask_enabled):
+        one_way_cap_multiplier = _clamp(
+            0.95
+            - (0.18 * max(0.0, abs(directional_bias) - 1.0))
+            - (0.30 * max(0.0, features.toxicity_score - 0.55)),
+            0.40,
+            0.95,
+        )
+        one_way_cap_qty = base_qty * one_way_cap_multiplier
+        if bid_enabled:
+            bid_size = min(bid_size, one_way_cap_qty)
+        if ask_enabled:
+            ask_size = min(ask_size, one_way_cap_qty)
 
     if bid_size <= 0 and ask_size <= 0:
         return QuotePlan(
