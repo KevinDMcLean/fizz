@@ -208,6 +208,133 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             return trade_cap
         return min(depth_cap, trade_cap)
 
+    def _entry_size_logging_fields(
+        self,
+        signal: MidSignalSnapshot,
+        *,
+        side: str,
+        profile: str,
+        notional: float,
+    ) -> Dict[str, float]:
+        recent_traded_notional = self._recent_traded_notional(signal)
+        depth_cap = self._depth_liquidity_cap_notional(signal, side, profile=profile, add_on=False)
+        trade_cap = self._trade_participation_cap_notional(signal, profile=profile, add_on=False)
+        return {
+            "entry_notional_pct_buying_power": _safe_ratio(notional, self.max_notional) * 100.0 if self.max_notional > 0 else 0.0,
+            "entry_required_margin_pct_equity": _safe_ratio(notional / float(self.leverage), self.account_balance) * 100.0
+            if self.account_balance > 0 and self.leverage > 0
+            else 0.0,
+            "entry_notional_pct_recent_traded": _safe_ratio(notional, recent_traded_notional) * 100.0 if recent_traded_notional > 0 else 0.0,
+            "entry_notional_pct_depth_cap": _safe_ratio(notional, depth_cap) * 100.0 if depth_cap > 0 else 0.0,
+            "entry_notional_pct_trade_cap": _safe_ratio(notional, trade_cap) * 100.0 if trade_cap > 0 else 0.0,
+        }
+
+    def _position_metrics_snapshot(
+        self,
+        signal: MidSignalSnapshot,
+        *,
+        hold_seconds: float | None = None,
+        current_realized_bps: float | None = None,
+        mfe_bps: float | None = None,
+        mae_bps: float | None = None,
+    ) -> Dict[str, float]:
+        assert self.position is not None
+        current_exit_price = self._current_exit_price(signal)
+        if hold_seconds is None:
+            hold_seconds = max(0.0, time.time() - self.position.opened_at)
+        if current_realized_bps is None:
+            current_realized_bps = self._current_realized_bps(current_exit_price)
+        if mfe_bps is None:
+            mfe_bps = self._position_mfe_bps(current_exit_price)[0]
+        if mae_bps is None:
+            mae_bps = self._position_mfe_bps(current_exit_price)[1]
+        direction = 1.0 if self.position.side == "LONG" else -1.0
+        gross = (current_exit_price - self.position.entry_price) * self.position.size * direction
+        current_unrealized = self.position.realized_pnl_locked + gross - self.position.entry_fee_paid
+        score = signal.long_score if self.position.side == "LONG" else signal.short_score
+        opposing_score = signal.short_score if self.position.side == "LONG" else signal.long_score
+        return {
+            "hold_seconds": hold_seconds,
+            "breakout_distance_bps": self._directional_breakout_distance(signal, self.position.side),
+            "score": score,
+            "score_edge": score - opposing_score,
+            "directional_flow": self._directional_flow(signal, self.position.side),
+            "directional_book": self._directional_book(signal, self.position.side),
+            "recent_traded_notional": self._recent_traded_notional(signal),
+            "current_realized_bps": current_realized_bps,
+            "mfe_bps": mfe_bps,
+            "mae_bps": mae_bps,
+            "current_unrealized_pnl": current_unrealized,
+        }
+
+    def _capture_position_hold_quality(
+        self,
+        signal: MidSignalSnapshot,
+        *,
+        hold_seconds: float | None = None,
+        current_realized_bps: float | None = None,
+        mfe_bps: float | None = None,
+        mae_bps: float | None = None,
+    ) -> Dict[str, float]:
+        assert self.position is not None
+        metrics = self._position_metrics_snapshot(
+            signal,
+            hold_seconds=hold_seconds,
+            current_realized_bps=current_realized_bps,
+            mfe_bps=mfe_bps,
+            mae_bps=mae_bps,
+        )
+        self.position.last_metrics.update(
+            {
+                "last_hold_seconds": metrics["hold_seconds"],
+                "last_breakout_distance_bps": metrics["breakout_distance_bps"],
+                "last_score": metrics["score"],
+                "last_score_edge": metrics["score_edge"],
+                "last_directional_flow": metrics["directional_flow"],
+                "last_directional_book": metrics["directional_book"],
+                "last_recent_traded_notional": metrics["recent_traded_notional"],
+                "last_current_realized_bps": metrics["current_realized_bps"],
+                "last_mfe_bps": metrics["mfe_bps"],
+                "last_mae_bps": metrics["mae_bps"],
+                "last_current_unrealized_pnl": metrics["current_unrealized_pnl"],
+            }
+        )
+        for threshold, label in ((1.0, "hold_1s"), (2.0, "hold_2s")):
+            if metrics["hold_seconds"] >= threshold and f"{label}_realized_bps" not in self.position.last_metrics:
+                self.position.last_metrics.update(
+                    {
+                        f"{label}_realized_bps": metrics["current_realized_bps"],
+                        f"{label}_breakout_distance_bps": metrics["breakout_distance_bps"],
+                        f"{label}_score_edge": metrics["score_edge"],
+                        f"{label}_directional_flow": metrics["directional_flow"],
+                        f"{label}_directional_book": metrics["directional_book"],
+                        f"{label}_recent_traded_notional": metrics["recent_traded_notional"],
+                        f"{label}_unrealized_pnl": metrics["current_unrealized_pnl"],
+                    }
+                )
+        return metrics
+
+    def _exit_bucket(self, exit_reason: str, *, hold_seconds: float) -> str:
+        if exit_reason == "break_reclaim_veto":
+            return "reclaim_veto"
+        if exit_reason == "failed_followthrough":
+            return "failed_followthrough"
+        if exit_reason == "breakout_failure":
+            return "breakout_failure"
+        if exit_reason == "trailing_stop_hit":
+            return "trail_stop"
+        if exit_reason == "initial_stop_hit":
+            return "initial_stop"
+        if exit_reason == "flow_flip_exit":
+            return "flow_flip"
+        if exit_reason == "hard_reversal_exit":
+            return "hard_reversal"
+        if exit_reason == "time_stop":
+            return "time_stop"
+        if hold_seconds <= 10.0:
+            return "early_exit_other"
+        return "other"
+
     def _entry_allowed(self, now_ts: float) -> bool:
         if not super()._entry_allowed(now_ts):
             return False
@@ -343,6 +470,12 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         )
         self._open_position(signal, candidate.side, reason, entry_profile)
         if self.position is not None:
+            size_fields = self._entry_size_logging_fields(
+                signal,
+                side=self.position.side,
+                profile=self.position.entry_profile,
+                notional=self.position.notional,
+            )
             self._write_feature_row(
                 {
                     "row_type": "entry",
@@ -350,6 +483,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                     "asset": self.asset,
                     "trade_id": self.position.trade_id,
                     "side": self.position.side,
+                    "candidate_profile": candidate.profile,
                     "entry_profile": self.position.entry_profile,
                     "entry_price": self.position.entry_price,
                     "notional": self.position.notional,
@@ -375,6 +509,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                     "score_edge": entry_score
                     - (signal.short_score if candidate.side == "LONG" else signal.long_score),
                     "breakout_distance_bps": self._directional_breakout_distance(signal, candidate.side),
+                    **size_fields,
                 }
             )
 
@@ -847,6 +982,12 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             return False
         if hold_seconds < self.probe_promotion_min_hold_seconds:
             return False
+        metrics = self._capture_position_hold_quality(
+            signal,
+            hold_seconds=hold_seconds,
+            current_realized_bps=current_realized_bps,
+            mfe_bps=mfe_bps,
+        )
         side = self.position.side
         score = signal.long_score if side == "LONG" else signal.short_score
         opposing_score = signal.short_score if side == "LONG" else signal.long_score
@@ -889,6 +1030,41 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         self.position.trail_distance_bps = max(
             self.position.trail_distance_bps,
             self._compute_trail_distance_bps(signal) * 1.10,
+        )
+        promotion_timestamp = _utc_iso()
+        self.position.last_metrics.update(
+            {
+                "promoted_to_campaign": True,
+                "promotion_timestamp_utc": promotion_timestamp,
+                "promotion_hold_seconds": hold_seconds,
+                "promotion_mfe_bps": mfe_bps,
+                "promotion_realized_bps": current_realized_bps,
+                "promotion_breakout_distance_bps": directional_breakout,
+                "promotion_score": score,
+                "promotion_score_edge": score - opposing_score,
+            }
+        )
+        self._write_feature_row(
+            {
+                "row_type": "promotion",
+                "timestamp_utc": promotion_timestamp,
+                "asset": self.asset,
+                "trade_id": self.position.trade_id,
+                "side": self.position.side,
+                "from_profile": "probe",
+                "to_profile": "campaign",
+                "hold_seconds": hold_seconds,
+                "mfe_bps": mfe_bps,
+                "realized_bps": current_realized_bps,
+                "breakout_distance_bps": directional_breakout,
+                "score": score,
+                "score_edge": score - opposing_score,
+                "recent_traded_notional": metrics["recent_traded_notional"],
+                "directional_flow": metrics["directional_flow"],
+                "directional_book": metrics["directional_book"],
+                "trail_arm_bps": self.position.trail_arm_bps,
+                "trail_distance_bps": self.position.trail_distance_bps,
+            }
         )
         self._write_event(
             "probe_promoted_to_campaign",
@@ -1105,6 +1281,13 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                 self._record_probe_failure(self.position.side)
             hold_seconds = max(0.0, time.time() - self.position.opened_at)
             current_realized_bps = self._current_realized_bps(trigger_price)
+            metrics = self._capture_position_hold_quality(
+                signal,
+                hold_seconds=hold_seconds,
+                current_realized_bps=current_realized_bps,
+                mfe_bps=mfe_bps,
+                mae_bps=mae_bps,
+            )
             label_payload = {
                 "row_type": "label",
                 "timestamp_utc": _utc_iso(),
@@ -1119,6 +1302,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                 "realized_bps": current_realized_bps,
                 "add_on_count": self.position.add_on_count,
                 "runner_live": self._runner_live(),
+                "exit_bucket": self._exit_bucket(exit_reason, hold_seconds=hold_seconds),
+                "reclaim_exit_seconds": hold_seconds if exit_reason == "break_reclaim_veto" else None,
                 "false_break": hold_seconds <= 10.0 and exit_reason in {
                     "failed_followthrough",
                     "breakout_failure",
@@ -1129,6 +1314,29 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                 },
                 "campaign_success": mfe_bps >= (self.position.stop_distance_bps * 1.0),
                 "add_on_success": self.position.add_on_count > 0 and mfe_bps >= (self.position.stop_distance_bps * 0.6),
+                "promoted_to_campaign": bool(self.position.last_metrics.get("promoted_to_campaign")),
+                "promotion_hold_seconds": self.position.last_metrics.get("promotion_hold_seconds"),
+                "promotion_mfe_bps": self.position.last_metrics.get("promotion_mfe_bps"),
+                "promotion_realized_bps": self.position.last_metrics.get("promotion_realized_bps"),
+                "promotion_breakout_distance_bps": self.position.last_metrics.get("promotion_breakout_distance_bps"),
+                "promotion_score_edge": self.position.last_metrics.get("promotion_score_edge"),
+                "last_breakout_distance_bps": metrics["breakout_distance_bps"],
+                "last_score_edge": metrics["score_edge"],
+                "last_directional_flow": metrics["directional_flow"],
+                "last_directional_book": metrics["directional_book"],
+                "last_recent_traded_notional": metrics["recent_traded_notional"],
+                "hold_1s_realized_bps": self.position.last_metrics.get("hold_1s_realized_bps"),
+                "hold_1s_breakout_distance_bps": self.position.last_metrics.get("hold_1s_breakout_distance_bps"),
+                "hold_1s_score_edge": self.position.last_metrics.get("hold_1s_score_edge"),
+                "hold_1s_directional_flow": self.position.last_metrics.get("hold_1s_directional_flow"),
+                "hold_1s_directional_book": self.position.last_metrics.get("hold_1s_directional_book"),
+                "hold_1s_recent_traded_notional": self.position.last_metrics.get("hold_1s_recent_traded_notional"),
+                "hold_2s_realized_bps": self.position.last_metrics.get("hold_2s_realized_bps"),
+                "hold_2s_breakout_distance_bps": self.position.last_metrics.get("hold_2s_breakout_distance_bps"),
+                "hold_2s_score_edge": self.position.last_metrics.get("hold_2s_score_edge"),
+                "hold_2s_directional_flow": self.position.last_metrics.get("hold_2s_directional_flow"),
+                "hold_2s_directional_book": self.position.last_metrics.get("hold_2s_directional_book"),
+                "hold_2s_recent_traded_notional": self.position.last_metrics.get("hold_2s_recent_traded_notional"),
             }
         super()._close_position(signal, exit_reason, trigger_price, mfe_bps, mae_bps)
         if exit_reason == "break_reclaim_veto":
@@ -1274,6 +1482,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             direction = 1.0 if self.position.side == "LONG" else -1.0
             gross = (current_exit_price - self.position.entry_price) * self.position.size * direction
             current_unrealized = self.position.realized_pnl_locked + gross - self.position.entry_fee_paid
+            self._capture_position_hold_quality(snapshot, hold_seconds=hold_seconds)
 
         payload = {
             "timestamp_utc": _utc_iso(),

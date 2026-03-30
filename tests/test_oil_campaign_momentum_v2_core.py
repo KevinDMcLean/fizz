@@ -155,7 +155,12 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
                 if line.strip()
             ]
             self.assertTrue(any(row.get("row_type") == "candidate" for row in rows))
-            self.assertTrue(any(row.get("row_type") == "label" for row in rows))
+            label_rows = [row for row in rows if row.get("row_type") == "label"]
+            self.assertEqual(len(label_rows), 1)
+            self.assertEqual(label_rows[0]["exit_bucket"], "reclaim_veto")
+            self.assertIsNotNone(label_rows[0]["reclaim_exit_seconds"])
+            self.assertIn("hold_1s_realized_bps", label_rows[0])
+            self.assertIn("hold_2s_realized_bps", label_rows[0])
 
     def test_entry_feature_row_captures_flow_and_depth_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,6 +190,10 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             self.assertIn("recent_traded_notional", entry_rows[0])
             self.assertIn("depth_liquidity_cap_notional", entry_rows[0])
             self.assertIn("trade_participation_cap_notional", entry_rows[0])
+            self.assertIn("entry_notional_pct_buying_power", entry_rows[0])
+            self.assertIn("entry_notional_pct_recent_traded", entry_rows[0])
+            self.assertIn("entry_notional_pct_depth_cap", entry_rows[0])
+            self.assertIn("entry_notional_pct_trade_cap", entry_rows[0])
 
     def test_trade_participation_cap_limits_campaign_entry_size(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -503,7 +512,13 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
 
     def test_campaign_seed_probe_promotes_only_after_hold_and_breakout_hold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1, probe_promotion_min_hold_seconds=1.5)
+            root = Path(tmp)
+            bot = self._make_bot(
+                root,
+                initiative_persistence_windows=1,
+                probe_promotion_min_hold_seconds=1.5,
+                features_jsonl_path=str(root / "features.jsonl"),
+            )
             now_ms = int(time.time() * 1000)
             self._seed_campaign_prices(bot, now_ms)
             bot.started_at_ts = time.time() - 20.0
@@ -548,6 +563,16 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             )
             self.assertTrue(promoted)
             self.assertEqual(bot.position.entry_profile, "campaign")
+            rows = [
+                json.loads(line)
+                for line in (root / "features.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            promotion_rows = [row for row in rows if row.get("row_type") == "promotion"]
+            self.assertEqual(len(promotion_rows), 1)
+            self.assertEqual(promotion_rows[0]["from_profile"], "probe")
+            self.assertEqual(promotion_rows[0]["to_profile"], "campaign")
+            self.assertIn("recent_traded_notional", promotion_rows[0])
 
     def _make_bot(self, root: Path, **overrides: object) -> OilCampaignMomentumV2Bot:
         params = {
