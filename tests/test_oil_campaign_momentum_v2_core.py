@@ -156,6 +156,91 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             self.assertTrue(any(row.get("row_type") == "candidate" for row in rows))
             self.assertTrue(any(row.get("row_type") == "label" for row in rows))
 
+    def test_entry_feature_row_captures_flow_and_depth_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bot = self._make_bot(
+                root,
+                initiative_persistence_windows=1,
+                features_jsonl_path=str(root / "features.jsonl"),
+            )
+            now_ms = int(time.time() * 1000)
+            self._seed_campaign_prices(bot, now_ms)
+            bot.started_at_ts = time.time() - 20.0
+
+            signal = bot._build_signal_snapshot(self._campaign_long_snapshot(now_ms))
+            self.assertIsNotNone(signal)
+            assert signal is not None
+
+            bot._maybe_enter(signal)
+
+            rows = [
+                json.loads(line)
+                for line in (root / "features.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            entry_rows = [row for row in rows if row.get("row_type") == "entry"]
+            self.assertEqual(len(entry_rows), 1)
+            self.assertIn("recent_traded_notional", entry_rows[0])
+            self.assertIn("depth_liquidity_cap_notional", entry_rows[0])
+            self.assertIn("trade_participation_cap_notional", entry_rows[0])
+
+    def test_trade_participation_cap_limits_campaign_entry_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(
+                Path(tmp),
+                initiative_persistence_windows=1,
+                campaign_trade_participation_cap=1.5,
+            )
+            now_ms = int(time.time() * 1000)
+            self._seed_campaign_prices(bot, now_ms)
+            signal = bot._build_signal_snapshot(self._campaign_long_snapshot(now_ms))
+            self.assertIsNotNone(signal)
+            assert signal is not None
+
+            cap = bot._liquidity_cap_notional(signal, "LONG", profile="campaign", add_on=False)
+            trade_cap = bot._trade_participation_cap_notional(signal, profile="campaign", add_on=False)
+
+            self.assertAlmostEqual(cap, trade_cap, places=6)
+
+    def test_campaign_trail_stays_wide_before_large_profit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            now_ms = int(time.time() * 1000)
+            self._seed_campaign_prices(bot, now_ms)
+            signal = bot._build_signal_snapshot(self._campaign_long_snapshot(now_ms))
+            self.assertIsNotNone(signal)
+            assert signal is not None
+
+            bot._open_position(signal, "LONG", "campaign_entry", "campaign")
+            assert bot.position is not None
+            bot.position.entry_profile = "campaign"
+
+            trail_distance_bps, stage = bot._campaign_trail_distance_bps(signal, mfe_bps=bot.position.stop_distance_bps * 1.0)
+
+            self.assertEqual(stage, "wide")
+            self.assertGreaterEqual(trail_distance_bps, bot.position.stop_distance_bps * 1.05)
+
+    def test_campaign_trail_tightens_after_large_profit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            now_ms = int(time.time() * 1000)
+            self._seed_campaign_prices(bot, now_ms)
+            signal = bot._build_signal_snapshot(self._campaign_long_snapshot(now_ms))
+            self.assertIsNotNone(signal)
+            assert signal is not None
+
+            bot._open_position(signal, "LONG", "campaign_entry", "campaign")
+            assert bot.position is not None
+            bot.position.entry_profile = "campaign"
+
+            wide_distance_bps, wide_stage = bot._campaign_trail_distance_bps(signal, mfe_bps=bot.position.stop_distance_bps * 1.0)
+            tight_distance_bps, tight_stage = bot._campaign_trail_distance_bps(signal, mfe_bps=bot.position.stop_distance_bps * 5.5)
+
+            self.assertEqual(wide_stage, "wide")
+            self.assertEqual(tight_stage, "tight")
+            self.assertLess(tight_distance_bps, wide_distance_bps)
+
     def test_probe_requires_meaningful_tick_aware_breakout_penetration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
@@ -549,6 +634,13 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             "reclaim_veto_window_seconds": 8.0,
             "reclaim_cooldown_seconds": 90.0,
             "probe_promotion_mfe_r": 0.12,
+            "probe_trade_participation_cap": 2.0,
+            "campaign_trade_participation_cap": 6.0,
+            "add_on_trade_participation_cap": 4.0,
+            "campaign_wide_trail_until_r": 2.0,
+            "campaign_tighten_after_r": 4.0,
+            "campaign_loose_trail_multiplier": 1.25,
+            "campaign_tight_trail_multiplier": 0.85,
             "features_jsonl_path": None,
         }
         params.update(overrides)

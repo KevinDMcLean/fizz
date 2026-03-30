@@ -44,6 +44,13 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         reclaim_veto_window_seconds: float,
         reclaim_cooldown_seconds: float,
         probe_promotion_mfe_r: float,
+        probe_trade_participation_cap: float,
+        campaign_trade_participation_cap: float,
+        add_on_trade_participation_cap: float,
+        campaign_wide_trail_until_r: float,
+        campaign_tighten_after_r: float,
+        campaign_loose_trail_multiplier: float,
+        campaign_tight_trail_multiplier: float,
         features_jsonl_path: str | None = None,
         **kwargs: object,
     ) -> None:
@@ -66,6 +73,14 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             raise ValueError("Reclaim veto window must be > 0 and cooldown must be >= 0.")
         if probe_promotion_mfe_r <= 0:
             raise ValueError("Probe promotion MFE R must be > 0.")
+        if probe_trade_participation_cap <= 0 or campaign_trade_participation_cap <= 0 or add_on_trade_participation_cap <= 0:
+            raise ValueError("Trade participation caps must be > 0.")
+        if campaign_wide_trail_until_r <= 0 or campaign_tighten_after_r <= 0:
+            raise ValueError("Campaign trail R thresholds must be > 0.")
+        if campaign_tighten_after_r < campaign_wide_trail_until_r:
+            raise ValueError("Campaign tighten threshold must be >= wide-trail threshold.")
+        if campaign_loose_trail_multiplier <= 0 or campaign_tight_trail_multiplier <= 0:
+            raise ValueError("Campaign trail multipliers must be > 0.")
 
         self.tick_size = tick_size
         self.breakout_buffer_ticks = breakout_buffer_ticks
@@ -80,6 +95,13 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         self.reclaim_veto_window_seconds = reclaim_veto_window_seconds
         self.reclaim_cooldown_seconds = reclaim_cooldown_seconds
         self.probe_promotion_mfe_r = probe_promotion_mfe_r
+        self.probe_trade_participation_cap = probe_trade_participation_cap
+        self.campaign_trade_participation_cap = campaign_trade_participation_cap
+        self.add_on_trade_participation_cap = add_on_trade_participation_cap
+        self.campaign_wide_trail_until_r = campaign_wide_trail_until_r
+        self.campaign_tighten_after_r = campaign_tighten_after_r
+        self.campaign_loose_trail_multiplier = campaign_loose_trail_multiplier
+        self.campaign_tight_trail_multiplier = campaign_tight_trail_multiplier
         self.features_jsonl_path = Path(features_jsonl_path) if features_jsonl_path else None
         if self.features_jsonl_path is not None:
             self.features_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,6 +155,54 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         if self.position is None:
             return False
         return self.position.trailing_armed and self.position.locked_stop_price is not None and self.position.add_on_count > 0
+
+    def _recent_traded_notional(self, signal: MidSignalSnapshot) -> float:
+        traded_volume = max(signal.buy_volume + signal.sell_volume, 0.0)
+        return traded_volume * max(signal.mid, 0.0)
+
+    def _trade_participation_cap_notional(
+        self,
+        signal: MidSignalSnapshot,
+        *,
+        profile: str,
+        add_on: bool,
+    ) -> float:
+        traded_notional = self._recent_traded_notional(signal)
+        if traded_notional <= 0:
+            return 0.0
+        if add_on:
+            cap_fraction = self.add_on_trade_participation_cap
+        elif profile == "probe":
+            cap_fraction = self.probe_trade_participation_cap
+        else:
+            cap_fraction = self.campaign_trade_participation_cap
+        return traded_notional * cap_fraction
+
+    def _depth_liquidity_cap_notional(
+        self,
+        signal: MidSignalSnapshot,
+        side: str,
+        *,
+        profile: str,
+        add_on: bool,
+    ) -> float:
+        return super()._liquidity_cap_notional(signal, side, profile=profile, add_on=add_on)
+
+    def _liquidity_cap_notional(
+        self,
+        signal: MidSignalSnapshot,
+        side: str,
+        *,
+        profile: str,
+        add_on: bool,
+    ) -> float:
+        depth_cap = self._depth_liquidity_cap_notional(signal, side, profile=profile, add_on=add_on)
+        trade_cap = self._trade_participation_cap_notional(signal, profile=profile, add_on=add_on)
+        if trade_cap <= 0:
+            return depth_cap
+        if depth_cap <= 0:
+            return trade_cap
+        return min(depth_cap, trade_cap)
 
     def _entry_allowed(self, now_ts: float) -> bool:
         if not super()._entry_allowed(now_ts):
@@ -249,6 +319,41 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             **signal.to_dict(),
         )
         self._open_position(signal, candidate.side, reason, candidate.profile)
+        if self.position is not None:
+            self._write_feature_row(
+                {
+                    "row_type": "entry",
+                    "timestamp_utc": _utc_iso(),
+                    "asset": self.asset,
+                    "trade_id": self.position.trade_id,
+                    "side": self.position.side,
+                    "entry_profile": self.position.entry_profile,
+                    "entry_price": self.position.entry_price,
+                    "notional": self.position.notional,
+                    "required_margin": self.position.required_margin,
+                    "size_multiplier": self.position.size_multiplier,
+                    "recent_traded_notional": self._recent_traded_notional(signal),
+                    "near_side_depth_notional": self._near_side_depth_notional(signal, self.position.side),
+                    "depth_liquidity_cap_notional": self._depth_liquidity_cap_notional(
+                        signal,
+                        self.position.side,
+                        profile=self.position.entry_profile,
+                        add_on=False,
+                    ),
+                    "trade_participation_cap_notional": self._trade_participation_cap_notional(
+                        signal,
+                        profile=self.position.entry_profile,
+                        add_on=False,
+                    ),
+                    "trail_distance_bps": self.position.trail_distance_bps,
+                    "trail_arm_bps": self.position.trail_arm_bps,
+                    "stop_distance_bps": self.position.stop_distance_bps,
+                    "score": entry_score,
+                    "score_edge": entry_score
+                    - (signal.short_score if candidate.side == "LONG" else signal.long_score),
+                    "breakout_distance_bps": self._directional_breakout_distance(signal, candidate.side),
+                }
+            )
 
     def _state_label(self, snapshot: Optional[MidSignalSnapshot]) -> str:
         if snapshot is None:
@@ -670,6 +775,43 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         )
         return round(min(multiplier, 1.0 + profile_boost + event_boost + self.score_notional_boost), 6)
 
+    def _campaign_trail_distance_bps(
+        self,
+        signal: MidSignalSnapshot,
+        *,
+        mfe_bps: float,
+    ) -> tuple[float, str]:
+        assert self.position is not None
+        base_distance = max(self._compute_trail_distance_bps(signal), self.position.stop_distance_bps * 0.85)
+        if not self._campaign_live():
+            return max(base_distance, self.position.trail_distance_bps), "probe"
+
+        stop_r = max(self.position.stop_distance_bps, 1e-9)
+        if mfe_bps < (stop_r * self.campaign_wide_trail_until_r):
+            return (
+                max(
+                    self.position.trail_distance_bps,
+                    base_distance * self.campaign_loose_trail_multiplier,
+                    stop_r * 1.05,
+                ),
+                "wide",
+            )
+        if mfe_bps < (stop_r * self.campaign_tighten_after_r):
+            return (
+                max(
+                    base_distance,
+                    stop_r * 0.90,
+                ),
+                "hold",
+            )
+        return (
+            max(
+                base_distance * self.campaign_tight_trail_multiplier,
+                stop_r * 0.65,
+            ),
+            "tight",
+        )
+
     def _maybe_promote_probe_to_campaign(
         self,
         signal: MidSignalSnapshot,
@@ -872,6 +1014,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                 )
                 return None
         if candidate.count == 1 and candidate.first_seen_exchange_time_ms == signal.sample_exchange_time_ms:
+            recent_traded_notional = self._recent_traded_notional(signal)
             self._write_feature_row(
                 {
                     "row_type": "candidate",
@@ -892,6 +1035,19 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                     "recent_vol_bps": signal.recent_vol_bps,
                     "long_score": signal.long_score,
                     "short_score": signal.short_score,
+                    "recent_traded_notional": recent_traded_notional,
+                    "near_side_depth_notional": self._near_side_depth_notional(signal, candidate.side),
+                    "depth_liquidity_cap_notional": self._depth_liquidity_cap_notional(
+                        signal,
+                        candidate.side,
+                        profile=candidate.profile,
+                        add_on=False,
+                    ),
+                    "trade_participation_cap_notional": self._trade_participation_cap_notional(
+                        signal,
+                        profile=candidate.profile,
+                        add_on=False,
+                    ),
                     "tick_bps": self._tick_bps(signal.mid),
                     "effective_breakout_buffer_bps": self._effective_breakout_buffer_bps(signal.mid),
                     "effective_probe_breakout_slack_bps": self._effective_probe_breakout_slack_bps(signal.mid),
@@ -1021,6 +1177,37 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         exit_reason = "trailing_stop_hit" if self.position.trailing_armed else "initial_stop_hit"
         self._close_position(signal, exit_reason, current_exit_price, mfe_bps, mae_bps)
 
+    def _update_trailing_stop(
+        self,
+        signal: MidSignalSnapshot,
+        current_exit_price: float,
+        mfe_bps: float,
+    ) -> None:
+        assert self.position is not None
+        trail_distance_bps, trail_stage = self._campaign_trail_distance_bps(signal, mfe_bps=mfe_bps)
+        previous_trail_distance_bps = self.position.trail_distance_bps
+        self.position.trail_distance_bps = trail_distance_bps
+        previous_locked_stop = self.position.locked_stop_price
+
+        super()._update_trailing_stop(signal, current_exit_price, mfe_bps)
+
+        locked_stop = self.position.locked_stop_price
+        if (
+            abs(previous_trail_distance_bps - trail_distance_bps) >= 0.5
+            or previous_locked_stop != locked_stop
+        ):
+            self._write_event(
+                "campaign_trail_profile_updated",
+                trade_id=self.position.trade_id,
+                side=self.position.side,
+                trail_stage=trail_stage,
+                trail_distance_bps=trail_distance_bps,
+                previous_trail_distance_bps=previous_trail_distance_bps,
+                mfe_bps=mfe_bps,
+                locked_stop=locked_stop,
+                active_stop=self.position.active_stop_price,
+            )
+
     def _write_sample(self, snapshot: MidSignalSnapshot) -> None:
         current_unrealized = 0.0
         position_side: Optional[str] = None
@@ -1031,6 +1218,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         hold_seconds: Optional[float] = None
         trail_armed = False
         position_phase: Optional[str] = None
+        campaign_trail_stage: Optional[str] = None
         if self.position is not None:
             position_side = self.position.side
             trade_id = self.position.trade_id
@@ -1044,6 +1232,10 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             else:
                 position_phase = "campaign" if self._campaign_live() else "probe"
             current_exit_price = self._current_exit_price(snapshot)
+            _, campaign_trail_stage = self._campaign_trail_distance_bps(
+                snapshot,
+                mfe_bps=self._position_mfe_bps(current_exit_price)[0],
+            )
             direction = 1.0 if self.position.side == "LONG" else -1.0
             gross = (current_exit_price - self.position.entry_price) * self.position.size * direction
             current_unrealized = self.position.realized_pnl_locked + gross - self.position.entry_fee_paid
@@ -1054,6 +1246,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             **snapshot.to_dict(),
             "state": self._state_label(snapshot),
             "strategy_name": APP_NAME,
+            "recent_traded_notional": self._recent_traded_notional(snapshot),
             "tick_size": self.tick_size,
             "tick_bps": self._tick_bps(snapshot.mid),
             "effective_breakout_buffer_bps": self._effective_breakout_buffer_bps(snapshot.mid),
@@ -1086,6 +1279,7 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
             "max_notional_seen": self.position.max_notional_seen if self.position is not None else None,
             "entry_profile": self.position.entry_profile if self.position is not None else None,
             "position_phase": position_phase,
+            "campaign_trail_stage": campaign_trail_stage,
             "size_multiplier": self.position.size_multiplier if self.position is not None else None,
             "probe_long_failures": len(self.long_probe_failures),
             "probe_short_failures": len(self.short_probe_failures),

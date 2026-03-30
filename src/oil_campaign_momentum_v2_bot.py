@@ -25,6 +25,13 @@ DEFAULT_INITIATIVE_PERSISTENCE_WINDOWS = 3
 DEFAULT_RECLAIM_VETO_WINDOW_SECONDS = 8.0
 DEFAULT_RECLAIM_COOLDOWN_SECONDS = 90.0
 DEFAULT_PROBE_PROMOTION_MFE_R = 0.12
+DEFAULT_PROBE_TRADE_PARTICIPATION_CAP = 2.0
+DEFAULT_CAMPAIGN_TRADE_PARTICIPATION_CAP = 6.0
+DEFAULT_ADD_ON_TRADE_PARTICIPATION_CAP = 4.0
+DEFAULT_CAMPAIGN_WIDE_TRAIL_UNTIL_R = 2.0
+DEFAULT_CAMPAIGN_TIGHTEN_AFTER_R = 4.0
+DEFAULT_CAMPAIGN_LOOSE_TRAIL_MULTIPLIER = 1.25
+DEFAULT_CAMPAIGN_TIGHT_TRAIL_MULTIPLIER = 0.85
 DEFAULT_FEATURES_JSONL = "logs/oil_campaign_features.jsonl"
 
 
@@ -43,6 +50,13 @@ def parse_args() -> argparse.Namespace:
     extra.add_argument("--reclaim-veto-window-seconds", type=float, default=DEFAULT_RECLAIM_VETO_WINDOW_SECONDS)
     extra.add_argument("--reclaim-cooldown-seconds", type=float, default=DEFAULT_RECLAIM_COOLDOWN_SECONDS)
     extra.add_argument("--probe-promotion-mfe-r", type=float, default=DEFAULT_PROBE_PROMOTION_MFE_R)
+    extra.add_argument("--probe-trade-participation-cap", type=float, default=DEFAULT_PROBE_TRADE_PARTICIPATION_CAP)
+    extra.add_argument("--campaign-trade-participation-cap", type=float, default=DEFAULT_CAMPAIGN_TRADE_PARTICIPATION_CAP)
+    extra.add_argument("--add-on-trade-participation-cap", type=float, default=DEFAULT_ADD_ON_TRADE_PARTICIPATION_CAP)
+    extra.add_argument("--campaign-wide-trail-until-r", type=float, default=DEFAULT_CAMPAIGN_WIDE_TRAIL_UNTIL_R)
+    extra.add_argument("--campaign-tighten-after-r", type=float, default=DEFAULT_CAMPAIGN_TIGHTEN_AFTER_R)
+    extra.add_argument("--campaign-loose-trail-multiplier", type=float, default=DEFAULT_CAMPAIGN_LOOSE_TRAIL_MULTIPLIER)
+    extra.add_argument("--campaign-tight-trail-multiplier", type=float, default=DEFAULT_CAMPAIGN_TIGHT_TRAIL_MULTIPLIER)
     extra.add_argument("--features-jsonl", default=DEFAULT_FEATURES_JSONL)
     extra_args, remaining = extra.parse_known_args()
 

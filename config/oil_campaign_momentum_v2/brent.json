@@ -118,5 +118,12 @@
   "initiative_persistence_windows": 3,
   "reclaim_veto_window_seconds": 8.0,
   "reclaim_cooldown_seconds": 90.0,
-  "probe_promotion_mfe_r": 0.12
+  "probe_promotion_mfe_r": 0.12,
+  "probe_trade_participation_cap": 2.0,
+  "campaign_trade_participation_cap": 6.0,
+  "add_on_trade_participation_cap": 4.0,
+  "campaign_wide_trail_until_r": 2.0,
+  "campaign_tighten_after_r": 4.0,
+  "campaign_loose_trail_multiplier": 1.25,
+  "campaign_tight_trail_multiplier": 0.85
 }
