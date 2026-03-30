@@ -48,11 +48,11 @@ class DashboardHubTests(unittest.TestCase):
                 },
                 {
                     "umbrella": "momentum",
-                    "name": "Oil Brent Momentum",
-                    "button_label": "Open Oil Brent Momentum",
+                    "name": "Oil Brent Momentum (Choosy)",
+                    "button_label": "Open Oil Brent Momentum (Choosy)",
                     "url": "http://127.0.0.1:8801/",
                     "port": 8801,
-                    "family": "Oil Momentum",
+                    "family": "Oil Momentum - Choosy",
                     "scope": "Oil-only strategy code.",
                     "strategy": "Oil Campaign Momentum v2",
                     "market": "xyz:BRENTOIL",
@@ -63,11 +63,11 @@ class DashboardHubTests(unittest.TestCase):
                 },
                 {
                     "umbrella": "momentum",
-                    "name": "Oil WTI Momentum",
-                    "button_label": "Open Oil WTI Momentum",
+                    "name": "Oil WTI Momentum (Choosy)",
+                    "button_label": "Open Oil WTI Momentum (Choosy)",
                     "url": "http://127.0.0.1:8802/",
                     "port": 8802,
-                    "family": "Oil Momentum",
+                    "family": "Oil Momentum - Choosy",
                     "scope": "Oil-only strategy code.",
                     "strategy": "Oil Campaign Momentum v2",
                     "market": "xyz:CL",
@@ -76,14 +76,46 @@ class DashboardHubTests(unittest.TestCase):
                     "headline": "Watching WTI breakout quality.",
                     "is_up": True,
                 },
+                {
+                    "umbrella": "momentum",
+                    "name": "Oil Brent Momentum (Medium)",
+                    "button_label": "Open Oil Brent Momentum (Medium)",
+                    "url": "http://127.0.0.1:8803/",
+                    "port": 8803,
+                    "family": "Oil Momentum - Medium",
+                    "scope": "Oil-only strategy code.",
+                    "strategy": "Oil Campaign Momentum v2",
+                    "market": "xyz:BRENTOIL",
+                    "venue": "xyz",
+                    "run_state": "running",
+                    "headline": "Relaxed learning runner.",
+                    "is_up": True,
+                },
+                {
+                    "umbrella": "momentum",
+                    "name": "Oil WTI Momentum (Medium)",
+                    "button_label": "Open Oil WTI Momentum (Medium)",
+                    "url": "http://127.0.0.1:8804/",
+                    "port": 8804,
+                    "family": "Oil Momentum - Medium",
+                    "scope": "Oil-only strategy code.",
+                    "strategy": "Oil Campaign Momentum v2",
+                    "market": "xyz:CL",
+                    "venue": "xyz",
+                    "run_state": "running",
+                    "headline": "Relaxed learning runner.",
+                    "is_up": True,
+                },
             ],
             "2026-03-30 08:20:00",
         )
 
         self.assertIn("Open Kevin HYPE", html)
         self.assertIn("Open Kevin CL", html)
-        self.assertIn("Open Oil Brent Momentum", html)
-        self.assertIn("Open Oil WTI Momentum", html)
+        self.assertIn("Open Oil Brent Momentum (Choosy)", html)
+        self.assertIn("Open Oil WTI Momentum (Choosy)", html)
+        self.assertIn("Open Oil Brent Momentum (Medium)", html)
+        self.assertIn("Open Oil WTI Momentum (Medium)", html)
         self.assertIn("Market Making", html)
         self.assertIn("Momentum", html)
         self.assertIn("http://127.0.0.1:8801/", html)
