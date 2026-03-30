@@ -174,6 +174,9 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         book = direction * book_imbalance
         directional_fast = direction * fast_impulse_bps
         directional_confirm = direction * confirm_impulse_bps
+        side_probe_failures = self.long_probe_failures if side == "LONG" else self.short_probe_failures
+        self._prune_probe_failures(side_probe_failures)
+        recent_side_probe_failures = len(side_probe_failures)
         if (
             full_ready
             and trade_count_ok
@@ -189,6 +192,9 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
         soft_probe = breakout_distance_bps < 0.0
         required_probe_fast = fast_threshold_bps * self.probe_fast_threshold_ratio
         required_probe_confirm = confirm_threshold_bps * self.probe_confirm_threshold_ratio
+        required_score_edge = self.probe_score_edge_min
+        required_flow = self.flow_imbalance_min * self.probe_flow_multiplier
+        required_book = self.book_imbalance_min * self.probe_book_multiplier
         if soft_probe:
             # When we are only inside slack rather than through the level, require both
             # confirmation modes plus a stronger impulse floor to cut false starts.
@@ -196,18 +202,29 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
                 return None
             required_probe_fast = max(required_probe_fast, fast_threshold_bps * 0.72)
             required_probe_confirm = max(required_probe_confirm, confirm_threshold_bps * 0.80)
+        if recent_side_probe_failures > 0:
+            # After a same-side probe loss, stop paying for another "almost there"
+            # entry and force the next probe to be a cleaner breakout.
+            if soft_probe:
+                return None
+            if side == "LONG":
+                required_probe_fast = max(required_probe_fast, fast_threshold_bps)
+                required_probe_confirm = max(required_probe_confirm, confirm_threshold_bps)
+                required_score_edge += 4.0
+                required_flow = max(required_flow, self.flow_imbalance_min * 1.15)
+                required_book = max(required_book, self.book_imbalance_min * 1.35)
         if (
             self._global_probe_allowed()
             and self._probe_allowed(side)
             and trade_count_ok
             and spread_ok
             and score >= self.probe_score_min
-            and score_edge >= self.probe_score_edge_min
+            and score_edge >= required_score_edge
             and directional_fast >= required_probe_fast
             and directional_confirm >= required_probe_confirm
             and breakout_distance_bps >= probe_boundary
-            and flow >= (self.flow_imbalance_min * self.probe_flow_multiplier)
-            and book >= (self.book_imbalance_min * self.probe_book_multiplier)
+            and flow >= required_flow
+            and book >= required_book
         ):
             return "probe"
         return None
@@ -727,6 +744,8 @@ class OilCampaignMomentumV2Bot(InitiatorFollowerJGThesisBot):
     ) -> None:
         label_payload: Dict[str, object] | None = None
         if self.position is not None:
+            if self.position.entry_profile == "probe" and exit_reason == "break_reclaim_veto":
+                self._record_probe_failure(self.position.side)
             hold_seconds = max(0.0, time.time() - self.position.opened_at)
             current_realized_bps = self._current_realized_bps(trigger_price)
             label_payload = {

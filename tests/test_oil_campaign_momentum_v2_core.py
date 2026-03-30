@@ -65,6 +65,8 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
 
             self.assertIsNone(bot.position)
             self.assertIsNotNone(bot.last_break_reclaim_exit_ts)
+            self.assertEqual(len(bot.long_probe_failures), 1)
+            self.assertEqual(len(bot.global_probe_failures), 1)
 
     def test_runner_state_label_after_unlock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,6 +183,73 @@ class OilCampaignMomentumV2CoreTests(unittest.TestCase):
             )
 
             self.assertIsNone(profile)
+
+    def test_recent_long_probe_failure_blocks_soft_reentry_and_tightens_next_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._make_bot(Path(tmp), initiative_persistence_windows=1)
+            bot._record_probe_failure("LONG")
+
+            soft_profile = bot._entry_profile(
+                side="LONG",
+                score=92.0,
+                opposing_score=40.0,
+                fast_impulse_bps=6.8,
+                confirm_impulse_bps=11.6,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=-0.40,
+                flow_imbalance=0.70,
+                book_imbalance=0.35,
+                trade_count_ok=True,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+                reference_price=100.0,
+                probe_depth_confirmed=True,
+                probe_initiative_confirmed=True,
+            )
+            hard_profile = bot._entry_profile(
+                side="LONG",
+                score=92.0,
+                opposing_score=40.0,
+                fast_impulse_bps=5.4,
+                confirm_impulse_bps=11.6,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=0.20,
+                flow_imbalance=0.70,
+                book_imbalance=0.35,
+                trade_count_ok=True,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+                reference_price=100.0,
+                probe_depth_confirmed=True,
+                probe_initiative_confirmed=True,
+            )
+            clean_profile = bot._entry_profile(
+                side="LONG",
+                score=95.0,
+                opposing_score=40.0,
+                fast_impulse_bps=5.7,
+                confirm_impulse_bps=11.4,
+                fast_threshold_bps=5.5,
+                confirm_threshold_bps=11.0,
+                breakout_distance_bps=0.30,
+                flow_imbalance=0.80,
+                book_imbalance=0.40,
+                trade_count_ok=True,
+                spread_ok=True,
+                extreme_blocked=False,
+                full_ready=False,
+                reference_price=100.0,
+                probe_depth_confirmed=True,
+                probe_initiative_confirmed=True,
+            )
+
+            self.assertIsNone(soft_profile)
+            self.assertIsNone(hard_profile)
+            self.assertEqual(clean_profile, "probe")
 
     def _make_bot(self, root: Path, **overrides: object) -> OilCampaignMomentumV2Bot:
         params = {
